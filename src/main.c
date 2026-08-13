@@ -331,8 +331,6 @@ static void UpdateGame(float dt) {
         case SCENE_GAMEPLAY: UpdateGameplay(dt); break;
         default: break;
     }
-    for (int i = 0; i < 256; i++) keysPrev[i] = keys[i];
-    mouseDownPrev = mouseDown;
 }
 
 static void RenderGame(void) {
@@ -408,6 +406,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
 
     MSG msg;
     while (running) {
+        /* 이번 프레임 입력을 받기 전에 "이전 프레임" 상태를 스냅샷 -- Update/Render
+           양쪽 어디서 엣지(방금 눌림)를 체크하든 동일한 기준을 보게 하기 위함 */
+        for (int i = 0; i < 256; i++) keysPrev[i] = keys[i];
+        mouseDownPrev = mouseDown;
+
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) running = FALSE;
             TranslateMessage(&msg);
