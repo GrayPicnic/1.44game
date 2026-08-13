@@ -8,9 +8,9 @@
 #include <windows.h>
 #include <stdint.h>
 
-#define GAME_W 320
-#define GAME_H 180
-#define WINDOW_SCALE 3
+#define GAME_W 640
+#define GAME_H 360
+#define WINDOW_SCALE 2
 #define WINDOW_TITLE "1.44MB Game"
 
 static uint32_t framebuffer[GAME_W * GAME_H];
