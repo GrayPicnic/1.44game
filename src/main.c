@@ -38,11 +38,17 @@ static const char *LANG_NAMES[3] = { "EN", "KR", "JP" };
 
 static float introTimer = 0.0f;
 
+#define BUBBLE_DIGIT_TIME 1.0f
+#define BUBBLE_PAUSE_TIME 1.2f
+#define LEVER_STEP 2.0f
+#define LEVER_FLASH_TIME 0.15f
+
 static float gpElapsed = 0.0f;
+static int targetNumber = 0;      /* FDC가 불러주는 3자리 목표값, 예: 325 */
+static int bubblePhase = 0;       /* 0,1,2 = 해당 자릿수 표시, 3 = 침묵(딜레이) */
 static float bubbleTimer = 0.0f;
-static int bubbleDigit = 0;
 static float leverAngle = 90.0f;
-static BOOL draggingLever = FALSE;
+static float leverFlash = 0.0f;
 static int leverCx = 560, leverCy = 190;
 static const int leverPivotGrabR = 70;
 
@@ -239,14 +245,18 @@ static void RenderIntro(void) {
     introTimer += 1.0f / 60.0f; /* 대략적인 진행 표시용, 정밀 dt는 UpdateGame에서 처리 */
 }
 
+static void EnterGameplay(void) {
+    scene = SCENE_GAMEPLAY;
+    gpElapsed = 0.0f;
+    bubblePhase = 0;
+    bubbleTimer = 0.0f;
+    targetNumber = rand() % 360; /* 예: 325 -- FDC가 불러주는 3자리 목표값 */
+}
+
 static void UpdateIntro(float dt) {
     (void)dt;
-    if (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE]) {
-        scene = SCENE_GAMEPLAY; gpElapsed = 0.0f; bubbleTimer = 0.0f;
-    }
-    if ((keys[VK_SPACE] && !keysPrev[VK_SPACE]) || (mouseDown && !mouseDownPrev)) {
-        scene = SCENE_GAMEPLAY; gpElapsed = 0.0f; bubbleTimer = 0.0f;
-    }
+    if (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE]) { EnterGameplay(); return; }
+    if ((keys[VK_SPACE] && !keysPrev[VK_SPACE]) || (mouseDown && !mouseDownPrev)) { EnterGameplay(); return; }
 }
 
 /* ---------- 씬: 조작화면 ---------- */
@@ -255,34 +265,38 @@ static void UpdateGameplay(float dt) {
     if (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE]) { scene = SCENE_LOBBY; return; }
 
     gpElapsed += dt;
-    bubbleTimer += dt;
-    if (bubbleTimer >= 1.0f) { bubbleTimer = 0.0f; bubbleDigit = rand() % 10; }
 
-    /* 레버 드래그 */
+    /* 말풍선: 목표값을 자릿수 단위로 하나씩 불러줌 (예: 3 -> 2 -> 5 -> 침묵 -> 반복) */
+    bubbleTimer += dt;
+    float phaseTime = (bubblePhase < 3) ? BUBBLE_DIGIT_TIME : BUBBLE_PAUSE_TIME;
+    if (bubbleTimer >= phaseTime) {
+        bubbleTimer = 0.0f;
+        bubblePhase = (bubblePhase + 1) % 4;
+    }
+
+    if (leverFlash > 0.0f) leverFlash -= dt;
+
+    /* 레버 클릭식 미세조정: 축 왼쪽 클릭하면 감소, 오른쪽 클릭하면 증가 */
     int dx = mouseX - leverCx, dy = mouseY - leverCy;
     float distToPivot = sqrtf((float)(dx * dx + dy * dy));
     if (mouseDown && !mouseDownPrev && distToPivot <= leverPivotGrabR) {
-        draggingLever = TRUE;
-        SetCapture(g_hwnd);
-    }
-    if (!mouseDown) {
-        if (draggingLever) ReleaseCapture();
-        draggingLever = FALSE;
-    }
-    if (draggingLever) {
-        float rad = atan2f((float)dy, (float)dx);
-        float deg = rad * 180.0f / PI_F; /* -180..180, 0=오른쪽 */
-        leverAngle = deg;
+        leverAngle += (mouseX < leverCx) ? -LEVER_STEP : LEVER_STEP;
+        if (leverAngle > 180.0f) leverAngle -= 360.0f;
+        if (leverAngle < -180.0f) leverAngle += 360.0f;
+        leverFlash = LEVER_FLASH_TIME;
     }
 }
 
 static void RenderGameplay(void) {
     ClearScreen(0xFF161B12); /* bg placeholder */
 
-    /* 좌측 숫자 말풍선 */
+    /* 좌측 숫자 말풍선 -- 목표값을 자릿수 단위로 하나씩 불러줌 (침묵 구간엔 빈 채로) */
     FillPixelRect(30, 130, 110, 100, 0xFF6A2540);
     DrawRectOutline(30, 130, 110, 100, 0xFFEEEEEE);
-    DrawNumber(30 + 40, 130 + 40, bubbleDigit, 1, 0xFFFFFFFF);
+    if (bubblePhase < 3) {
+        int digits[3] = { targetNumber / 100, (targetNumber / 10) % 10, targetNumber % 10 };
+        DrawNumber(30 + 40, 130 + 40, digits[bubblePhase], 1, 0xFFFFFFFF);
+    }
 
     /* 상단 타이머 게이지 */
     float timeLeft = GAMEPLAY_TIME_LIMIT - gpElapsed;
@@ -312,12 +326,12 @@ static void RenderGameplay(void) {
     for (float t = 0.0f; t <= 1.0f; t += 0.02f) {
         int px = leverCx + (int)((hx - leverCx) * t);
         int py = leverCy + (int)((hy - leverCy) * t);
-        FillPixelRect(px - 1, py - 1, 3, 3, draggingLever ? 0xFFFFB020 : 0xFF8A8A9A);
+        FillPixelRect(px - 1, py - 1, 3, 3, leverFlash > 0.0f ? 0xFFFFB020 : 0xFF8A8A9A);
     }
     DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
 
     /* 하단 단축키 안내 */
-    DrawLabel(20, GAME_H - 20, "DRAG LEVER: ADJUST", 0xFFAAAAAA, 1);
+    DrawLabel(20, GAME_H - 20, "CLICK LEVER: FINE-ADJUST", 0xFFAAAAAA, 1);
     DrawLabel(200, GAME_H - 20, "SPACE: CONFIRM", 0xFFAAAAAA, 1);
     int escW = TextWidth("ESC: QUIT", 1);
     DrawLabel(GAME_W - 20 - escW, GAME_H - 20, "ESC: QUIT", 0xFFAAAAAA, 1);
