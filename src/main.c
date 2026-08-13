@@ -356,8 +356,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp < 256) keys[wp] = FALSE;
             return 0;
         case WM_MOUSEMOVE:
-            mouseX = (short)LOWORD(lp);
-            mouseY = (short)HIWORD(lp);
+            /* 창은 WINDOW_SCALE배로 확대되어 있으니 게임 좌표계(640x360)로 되돌린다 */
+            mouseX = (short)LOWORD(lp) / WINDOW_SCALE;
+            mouseY = (short)HIWORD(lp) / WINDOW_SCALE;
             return 0;
         case WM_LBUTTONDOWN:
             mouseDown = TRUE;
