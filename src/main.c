@@ -1,9 +1,9 @@
 /*
- * 1.44MB 게임 콘테스트용 "수동 사격 절차" 프로토타입.
- * - K9 자주포 비상 수동 사격 절차를 모티브로, 전장은 보여주지 않고
- *   포반원 시점에서 하달받은 제원대로 빠르고 정확하게 방열/장전/격발하는 게임.
- * - 외부 런타임 없음, 순수 Win32 + GDI. 텍스트는 7세그먼트 숫자를 직접 픽셀로 그려서 표시.
- * - 방위각은 실제 밀(mil) 대신 이해하기 쉬운 각도(0~359°)로 단순화했다.
+ * 1.44MB 게임 콘테스트용 화면 골격(스캐폴드) 프로토타입.
+ * 로비 -> 인트로 -> 조작화면 (+ 옵션 오버레이) 전체 흐름.
+ * 실제 아트는 전부 나중에 이미지로 교체할 자리 -- 지금은 색깔로만 구분한 사각형.
+ * 텍스트는 로마자만 있으면 되는 영어 라벨이라 5x7 도트매트릭스 폰트를 직접 그렸다.
+ * (한/일 다국어는 문구를 이미지로 미리 그리는 별도 파이프라인이 필요 -- 다음 단계)
  */
 
 #include <windows.h>
@@ -14,29 +14,11 @@
 #define GAME_W 640
 #define GAME_H 360
 #define WINDOW_SCALE 2
-#define WINDOW_TITLE "1.44MB Fire Mission"
-
+#define WINDOW_TITLE "1.44MB Game - Scaffold"
 #define PI_F 3.14159265f
-#define TIME_LIMIT 20.0f
+#define GAMEPLAY_TIME_LIMIT 30.0f
 
-#define AZ_TOL 3.0f
-#define EL_TOL 2.0f
-#define AZ_RATE 70.0f
-#define EL_RATE 40.0f
-#define EL_MIN 10.0f
-#define EL_MAX 65.0f
-
-#define COL_BG      0xFF161B12
-#define COL_PANEL   0xFF20281A
-#define COL_GREEN   0xFF3CFF6E
-#define COL_AMBER   0xFFFFB020
-#define COL_RED     0xFFFF4433
-#define COL_DIM     0xFF3A4430
-
-typedef enum {
-    STAGE_AZIMUTH, STAGE_ELEVATION, STAGE_CHARGE,
-    STAGE_LOADING, STAGE_BREECH, STAGE_FIRE, STAGE_RESULT
-} Stage;
+typedef enum { SCENE_LOBBY, SCENE_OPTIONS, SCENE_INTRO, SCENE_GAMEPLAY } Scene;
 
 static uint32_t framebuffer[GAME_W * GAME_H];
 static BITMAPINFO bmi;
@@ -44,20 +26,25 @@ static BOOL running = TRUE;
 static BOOL keys[256], keysPrev[256];
 static HWND g_hwnd;
 
-static Stage stage;
-static float elapsed;
-static BOOL timeUp;
+static int mouseX, mouseY;
+static BOOL mouseDown, mouseDownPrev;
 
-static float azTarget, azCurrent;
-static float elTarget, elCurrent;
-static int chTarget, chResult;
-static float loadZoneStart;
-static float loadStageTimer;
-static BOOL loadHit;
-static BOOL breechDone;
+static Scene scene = SCENE_LOBBY;
+static Scene sceneBeforeOptions = SCENE_LOBBY;
 
-static BOOL azOk, elOk, chOk, loadOk;
-static BOOL missionHit;
+static BOOL soundOn = TRUE;
+static int langIndex = 0; /* 0=EN 1=KR 2=JP -- placeholder cycle, only EN text exists for now */
+static const char *LANG_NAMES[3] = { "EN", "KR", "JP" };
+
+static float introTimer = 0.0f;
+
+static float gpElapsed = 0.0f;
+static float bubbleTimer = 0.0f;
+static int bubbleDigit = 0;
+static float leverAngle = 90.0f;
+static BOOL draggingLever = FALSE;
+static int leverCx = 560, leverCy = 190;
+static const int leverPivotGrabR = 70;
 
 /* ---------- 저수준 렌더링 ---------- */
 
@@ -85,30 +72,20 @@ static void DrawRing(int cx, int cy, float radius, uint32_t color) {
         PutPixel(cx + (int)(cosf(rad) * radius), cy + (int)(sinf(rad) * radius), color);
     }
 }
-static void DrawRadial(int cx, int cy, float valueDeg, float rFrom, float rTo, uint32_t color) {
-    float rad = (valueDeg - 90.0f) * PI_F / 180.0f;
-    float cs = cosf(rad), sn = sinf(rad);
-    for (float rr = rFrom; rr <= rTo; rr += 1.0f) {
-        int px = cx + (int)(cs * rr), py = cy + (int)(sn * rr);
-        PutPixel(px, py, color);
-        PutPixel(px + 1, py, color);
-    }
-}
 
-/* ---------- 7세그먼트 숫자 ---------- */
+/* ---------- 7세그먼트 숫자 (게이지/큰 숫자용) ---------- */
 
 static const int SEG[10] = { 63, 6, 91, 79, 102, 109, 125, 7, 127, 111 };
-
 static void DrawDigit(int x, int y, int d, uint32_t color) {
     if (d < 0 || d > 9) return;
     int s = SEG[d];
-    if (s & 1)  FillPixelRect(x + 2, y,      6, 2, color); /* a */
-    if (s & 2)  FillPixelRect(x + 8, y + 1,  2, 7, color); /* b */
-    if (s & 4)  FillPixelRect(x + 8, y + 9,  2, 7, color); /* c */
-    if (s & 8)  FillPixelRect(x + 2, y + 16, 6, 2, color); /* d */
-    if (s & 16) FillPixelRect(x,     y + 9,  2, 7, color); /* e */
-    if (s & 32) FillPixelRect(x,     y + 1,  2, 7, color); /* f */
-    if (s & 64) FillPixelRect(x + 2, y + 8,  6, 2, color); /* g */
+    if (s & 1)  FillPixelRect(x + 2, y,      6, 2, color);
+    if (s & 2)  FillPixelRect(x + 8, y + 1,  2, 7, color);
+    if (s & 4)  FillPixelRect(x + 8, y + 9,  2, 7, color);
+    if (s & 8)  FillPixelRect(x + 2, y + 16, 6, 2, color);
+    if (s & 16) FillPixelRect(x,     y + 9,  2, 7, color);
+    if (s & 32) FillPixelRect(x,     y + 1,  2, 7, color);
+    if (s & 64) FillPixelRect(x + 2, y + 8,  6, 2, color);
 }
 static void DrawNumber(int x, int y, int value, int width, uint32_t color) {
     if (value < 0) value = 0;
@@ -118,184 +95,252 @@ static void DrawNumber(int x, int y, int value, int width, uint32_t color) {
     }
 }
 
-/* ---------- 라운드 로직 ---------- */
+/* ---------- 5x7 도트매트릭스 폰트 (영문 라벨용) ---------- */
 
-static float RandRange(float lo, float hi) {
-    return lo + ((float)rand() / (float)RAND_MAX) * (hi - lo);
-}
-static float AzDiff(float a, float b) {
-    float d = fabsf(a - b);
-    if (d > 180.0f) d = 360.0f - d;
-    return d;
-}
+typedef struct { char c; unsigned char rows[7]; } Glyph;
+static const Glyph FONT5X7[] = {
+    {'A', {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}},
+    {'B', {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}},
+    {'C', {0x0F,0x10,0x10,0x10,0x10,0x10,0x0F}},
+    {'D', {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E}},
+    {'E', {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}},
+    {'F', {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}},
+    {'G', {0x0F,0x10,0x10,0x17,0x11,0x11,0x0F}},
+    {'H', {0x11,0x11,0x11,0x1F,0x11,0x11,0x11}},
+    {'I', {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E}},
+    {'J', {0x07,0x02,0x02,0x02,0x02,0x12,0x0C}},
+    {'K', {0x11,0x12,0x14,0x18,0x14,0x12,0x11}},
+    {'L', {0x10,0x10,0x10,0x10,0x10,0x10,0x1F}},
+    {'M', {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}},
+    {'N', {0x11,0x19,0x15,0x15,0x13,0x11,0x11}},
+    {'O', {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}},
+    {'P', {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}},
+    {'Q', {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}},
+    {'R', {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}},
+    {'S', {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}},
+    {'T', {0x1F,0x04,0x04,0x04,0x04,0x04,0x04}},
+    {'U', {0x11,0x11,0x11,0x11,0x11,0x11,0x0E}},
+    {'V', {0x11,0x11,0x11,0x11,0x11,0x0A,0x04}},
+    {'W', {0x11,0x11,0x11,0x15,0x15,0x15,0x0A}},
+    {'X', {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}},
+    {'Y', {0x11,0x11,0x0A,0x04,0x04,0x04,0x04}},
+    {'Z', {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}},
+    {':', {0x00,0x04,0x00,0x00,0x00,0x04,0x00}},
+    {'.', {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C}},
+    {'-', {0x00,0x00,0x00,0x1F,0x00,0x00,0x00}},
+    {'!', {0x04,0x04,0x04,0x04,0x04,0x00,0x04}},
+    {'?', {0x0E,0x11,0x01,0x02,0x04,0x00,0x04}},
+};
+#define FONT_COUNT (int)(sizeof(FONT5X7) / sizeof(FONT5X7[0]))
 
-static void NewMission(void) {
-    azTarget = (float)(rand() % 360);
-    azCurrent = fmodf(azTarget + 140.0f + RandRange(0.0f, 80.0f), 360.0f);
-    elTarget = RandRange(EL_MIN, EL_MAX);
-    elCurrent = EL_MIN;
-    chTarget = 1 + rand() % 7;
-    chResult = 0;
-    loadZoneStart = RandRange(20.0f, 150.0f);
-    loadStageTimer = 0.0f;
-    loadHit = FALSE;
-    breechDone = FALSE;
-    elapsed = 0.0f;
-    timeUp = FALSE;
-    stage = STAGE_AZIMUTH;
-}
-
-static void EvaluateMission(void) {
-    azOk = AzDiff(azCurrent, azTarget) <= AZ_TOL;
-    elOk = fabsf(elCurrent - elTarget) <= EL_TOL;
-    chOk = chResult == chTarget;
-    loadOk = loadHit;
-    missionHit = azOk && elOk && chOk && loadOk && !timeUp;
-
-    char buf[256];
-    if (missionHit) {
-        wsprintfA(buf, "%s  |  \xEB\xAA\x85\xEC\xA4\x91! R\xEB\xA1\x9C \xEB\x8B\xA4\xEC\x9D\x8C 사격",
-            WINDOW_TITLE);
-    } else if (timeUp) {
-        wsprintfA(buf, "%s  |  \xEC\x8B\x9C\xEA\xB0\x84\xEC\xB4\x88\xEA\xB3\xBC - \xEB\xB9\x97\xEB\x82\x98\xEA\xB0\x90  |  R\xEB\xA1\x9C \xEC\x9E\xAC\xEC\x8B\x9C\xEB\x8F\x84",
-            WINDOW_TITLE);
-    } else {
-        char reasons[200] = "";
-        if (!azOk) lstrcatA(reasons, "\xEB\xB0\xA9\xEC\x9C\x84\xEA\xB0\x81\xEC\x98\xA4\xEC\xB0\xA8 ");
-        if (!elOk) lstrcatA(reasons, "\xEC\x82\xAC\xEA\xB0\x81\xEC\x98\xA4\xEC\xB0\xA8 ");
-        if (!chOk) lstrcatA(reasons, "\xEC\x9E\xA5\xEC\x95\xBD\xEB\xB2\x88\xED\x98\xB8\xED\x8B\x80\xEB\xA6\xBC ");
-        if (!loadOk) lstrcatA(reasons, "\xEC\x9E\xA5\xEC\xA0\x84\xED\x83\x80\xEC\x9D\xB4\xEB\xB0\x8D\xEB\xB6\x88\xEB\x9F\x89 ");
-        wsprintfA(buf, "%s  |  \xEB\xB9\x97\xEB\x82\x98\xEA\xB0\x90 - \xEC\x9B\x90\xEC\x9D\xB8: %s |  R\xEB\xA1\x9C \xEC\x9E\xAC\xEC\x8B\x9C\xEB\x8F\x84",
-            WINDOW_TITLE, reasons);
-    }
-    SetWindowTextA(g_hwnd, buf);
-}
-
-static void UpdateGame(float dt) {
-    if (stage == STAGE_RESULT) {
-        if (keys['R'] && !keysPrev['R']) NewMission();
-        return;
-    }
-
-    elapsed += dt;
-    if (elapsed >= TIME_LIMIT && !timeUp) {
-        timeUp = TRUE;
-        stage = STAGE_RESULT;
-        EvaluateMission();
-        return;
-    }
-
-    switch (stage) {
-        case STAGE_AZIMUTH:
-            if (keys[VK_LEFT] || keys['A']) azCurrent -= AZ_RATE * dt;
-            if (keys[VK_RIGHT] || keys['D']) azCurrent += AZ_RATE * dt;
-            azCurrent = fmodf(azCurrent + 360.0f, 360.0f);
-            if (keys[VK_SPACE] && !keysPrev[VK_SPACE]) stage = STAGE_ELEVATION;
-            break;
-        case STAGE_ELEVATION:
-            if (keys[VK_UP] || keys['W']) elCurrent += EL_RATE * dt;
-            if (keys[VK_DOWN] || keys['S']) elCurrent -= EL_RATE * dt;
-            if (elCurrent < 0.0f) elCurrent = 0.0f;
-            if (elCurrent > 75.0f) elCurrent = 75.0f;
-            if (keys[VK_SPACE] && !keysPrev[VK_SPACE]) stage = STAGE_CHARGE;
-            break;
-        case STAGE_CHARGE:
-            for (int n = 1; n <= 7; n++) {
-                if (keys['0' + n] && !keysPrev['0' + n]) {
-                    chResult = n;
-                    stage = STAGE_LOADING;
+static void DrawChar(int x, int y, char c, uint32_t color, int scale) {
+    if (c == ' ') return;
+    for (int i = 0; i < FONT_COUNT; i++) {
+        if (FONT5X7[i].c != c) continue;
+        for (int row = 0; row < 7; row++) {
+            unsigned char bits = FONT5X7[i].rows[row];
+            for (int col = 0; col < 5; col++) {
+                if (bits & (1 << (4 - col))) {
+                    FillPixelRect(x + col * scale, y + row * scale, scale, scale, color);
                 }
             }
-            break;
-        case STAGE_LOADING: {
-            loadStageTimer += dt;
-            if (keys[VK_SPACE] && !keysPrev[VK_SPACE]) {
-                float t = fmodf(loadStageTimer, 1.2f);
-                float pos = (t < 0.6f) ? (t / 0.6f * 200.0f) : ((1.2f - t) / 0.6f * 200.0f);
-                loadHit = (pos >= loadZoneStart && pos <= loadZoneStart + 30.0f);
-                stage = STAGE_BREECH;
-            }
-            break;
         }
-        case STAGE_BREECH:
-            if (keys[VK_SPACE] && !keysPrev[VK_SPACE]) {
-                breechDone = TRUE;
-                stage = STAGE_FIRE;
-            }
-            break;
-        case STAGE_FIRE:
-            if (keys[VK_RETURN] && !keysPrev[VK_RETURN]) {
-                stage = STAGE_RESULT;
-                EvaluateMission();
-            }
-            break;
-        default: break;
+        return;
     }
-
-    for (int i = 0; i < 256; i++) keysPrev[i] = keys[i];
+}
+static void DrawLabel(int x, int y, const char *text, uint32_t color, int scale) {
+    int cx = x;
+    for (const char *p = text; *p; p++) {
+        DrawChar(cx, y, *p, color, scale);
+        cx += 6 * scale;
+    }
+}
+static int TextWidth(const char *text, int scale) {
+    int len = 0;
+    for (const char *p = text; *p; p++) len++;
+    return len * 6 * scale;
 }
 
-/* ---------- 렌더링 ---------- */
+/* ---------- 버튼 ---------- */
+
+typedef struct { int x, y, w, h; uint32_t color; const char *label; } Button;
+
+static BOOL PointInRect(int px, int py, int x, int y, int w, int h) {
+    return px >= x && px < x + w && py >= y && py < y + h;
+}
+static BOOL ButtonClicked(Button *b) {
+    BOOL hover = PointInRect(mouseX, mouseY, b->x, b->y, b->w, b->h);
+    uint32_t c = b->color;
+    if (hover) {
+        int r = (int)((c >> 16) & 0xFF) + 30; if (r > 255) r = 255;
+        int g = (int)((c >> 8) & 0xFF) + 30;  if (g > 255) g = 255;
+        int bl = (int)(c & 0xFF) + 30;        if (bl > 255) bl = 255;
+        c = 0xFF000000 | (r << 16) | (g << 8) | bl;
+    }
+    FillPixelRect(b->x, b->y, b->w, b->h, c);
+    DrawRectOutline(b->x, b->y, b->w, b->h, 0xFFEEEEEE);
+    int tw = TextWidth(b->label, 2);
+    DrawLabel(b->x + (b->w - tw) / 2, b->y + b->h / 2 - 7, b->label, 0xFFFFFFFF, 2);
+    return hover && mouseDown && !mouseDownPrev;
+}
+
+/* ---------- 씬: 로비 ---------- */
+
+static void RenderLobby(void) {
+    ClearScreen(0xFF1B3A3A); /* bg placeholder */
+
+    FillPixelRect(170, 40, 300, 90, 0xFF6B3FA0); /* title image placeholder */
+    DrawRectOutline(170, 40, 300, 90, 0xFFEEEEEE);
+    DrawLabel(170 + 60, 40 + 40, "GAME TITLE", 0xFFFFFFFF, 2);
+
+    Button startBtn = { 220, 170, 200, 44, 0xFF2E8B57, "START" };
+    Button optBtn   = { 220, 226, 200, 44, 0xFF3060B0, "OPTIONS" };
+    Button exitBtn  = { 220, 282, 200, 44, 0xFFA03030, "EXIT" };
+
+    if (ButtonClicked(&startBtn)) { scene = SCENE_INTRO; introTimer = 0.0f; }
+    if (ButtonClicked(&optBtn))   { sceneBeforeOptions = SCENE_LOBBY; scene = SCENE_OPTIONS; }
+    if (ButtonClicked(&exitBtn))  { running = FALSE; }
+}
+
+/* ---------- 씬: 옵션 오버레이 ---------- */
+
+static void RenderOptions(void) {
+    FillPixelRect(140, 90, 360, 180, 0xFF2A2A3A);
+    DrawRectOutline(140, 90, 360, 180, 0xFFEEEEEE);
+    DrawLabel(160, 110, "OPTIONS", 0xFFFFFFFF, 2);
+
+    char soundLabel[24];
+    wsprintfA(soundLabel, "SOUND: %s", soundOn ? "ON" : "OFF");
+    Button soundBtn = { 170, 150, 300, 40, 0xFFD08020, soundLabel };
+    if (ButtonClicked(&soundBtn)) soundOn = !soundOn;
+
+    char langLabel[24];
+    wsprintfA(langLabel, "LANGUAGE: %s", LANG_NAMES[langIndex]);
+    Button langBtn = { 170, 200, 300, 40, 0xFF20A0A0, langLabel };
+    if (ButtonClicked(&langBtn)) langIndex = (langIndex + 1) % 3;
+
+    Button backBtn = { 170, 250, 300, 40, 0xFF606060, "BACK" };
+    if (ButtonClicked(&backBtn) || (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE])) {
+        scene = sceneBeforeOptions;
+    }
+}
+
+/* ---------- 씬: 인트로 ---------- */
+
+static void RenderIntro(void) {
+    ClearScreen(0xFF241B45); /* bg placeholder */
+
+    FillPixelRect(40, 260, GAME_W - 80, 70, 0xFF4A3524); /* npc dialogue box */
+    DrawRectOutline(40, 260, GAME_W - 80, 70, 0xFFEEEEEE);
+    DrawLabel(60, 280, "FIRE MISSION INCOMING. STAND BY.", 0xFFFFE0B0, 2);
+
+    DrawLabel(GAME_W - 150, GAME_H - 20, "SKIP: ESC", 0xFFAAAAAA, 1);
+
+    introTimer += 1.0f / 60.0f; /* 대략적인 진행 표시용, 정밀 dt는 UpdateGame에서 처리 */
+}
+
+static void UpdateIntro(float dt) {
+    (void)dt;
+    if (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE]) {
+        scene = SCENE_GAMEPLAY; gpElapsed = 0.0f; bubbleTimer = 0.0f;
+    }
+    if ((keys[VK_SPACE] && !keysPrev[VK_SPACE]) || (mouseDown && !mouseDownPrev)) {
+        scene = SCENE_GAMEPLAY; gpElapsed = 0.0f; bubbleTimer = 0.0f;
+    }
+}
+
+/* ---------- 씬: 조작화면 ---------- */
+
+static void UpdateGameplay(float dt) {
+    if (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE]) { scene = SCENE_LOBBY; return; }
+
+    gpElapsed += dt;
+    bubbleTimer += dt;
+    if (bubbleTimer >= 1.0f) { bubbleTimer = 0.0f; bubbleDigit = rand() % 10; }
+
+    /* 레버 드래그 */
+    int dx = mouseX - leverCx, dy = mouseY - leverCy;
+    float distToPivot = sqrtf((float)(dx * dx + dy * dy));
+    if (mouseDown && !mouseDownPrev && distToPivot <= leverPivotGrabR) {
+        draggingLever = TRUE;
+        SetCapture(g_hwnd);
+    }
+    if (!mouseDown) {
+        if (draggingLever) ReleaseCapture();
+        draggingLever = FALSE;
+    }
+    if (draggingLever) {
+        float rad = atan2f((float)dy, (float)dx);
+        float deg = rad * 180.0f / PI_F; /* -180..180, 0=오른쪽 */
+        leverAngle = deg;
+    }
+}
+
+static void RenderGameplay(void) {
+    ClearScreen(0xFF161B12); /* bg placeholder */
+
+    /* 좌측 숫자 말풍선 */
+    FillPixelRect(30, 130, 110, 100, 0xFF6A2540);
+    DrawRectOutline(30, 130, 110, 100, 0xFFEEEEEE);
+    DrawNumber(30 + 40, 130 + 40, bubbleDigit, 1, 0xFFFFFFFF);
+
+    /* 상단 타이머 게이지 */
+    float timeLeft = GAMEPLAY_TIME_LIMIT - gpElapsed;
+    if (timeLeft < 0.0f) timeLeft = 0.0f;
+    int barW = 300, barH = 14, barX = GAME_W / 2 - barW / 2, barY = 16;
+    DrawRectOutline(barX, barY, barW, barH, 0xFFAAAAAA);
+    int fillW = (int)(timeLeft / GAMEPLAY_TIME_LIMIT * (float)(barW - 4));
+    if (fillW < 0) fillW = 0;
+    BOOL lowTime = timeLeft <= 5.0f;
+    BOOL blinkOn = fmodf(gpElapsed, 0.4f) < 0.2f;
+    uint32_t gaugeColor = lowTime ? (blinkOn ? 0xFFFF4433 : 0xFF662222) : 0xFF3CFF6E;
+    FillPixelRect(barX + 2, barY + 2, fillW, barH - 4, gaugeColor);
+    DrawNumber(barX + barW + 12, barY - 2, (int)(timeLeft + 0.99f), 2, lowTime ? 0xFFFF4433 : 0xFF3CFF6E);
+
+    /* 중앙 숫자판(계량기 자리, 지금은 레버 각도값 표시) */
+    FillPixelRect(230, 140, 160, 100, 0xFF1E2A4A);
+    DrawRectOutline(230, 140, 160, 100, 0xFFEEEEEE);
+    DrawLabel(250, 150, "METER", 0xFF88AACC, 1);
+    int meterValue = (int)((leverAngle + 180.0f)); /* 0..360 표시용 */
+    DrawNumber(255, 190, meterValue, 3, 0xFF3CFF6E);
+
+    /* 우측 레버 */
+    DrawRing(leverCx, leverCy, 8.0f, 0xFF8A8A9A);
+    float rad = leverAngle * PI_F / 180.0f;
+    int hx = leverCx + (int)(cosf(rad) * 60.0f);
+    int hy = leverCy + (int)(sinf(rad) * 60.0f);
+    for (float t = 0.0f; t <= 1.0f; t += 0.02f) {
+        int px = leverCx + (int)((hx - leverCx) * t);
+        int py = leverCy + (int)((hy - leverCy) * t);
+        FillPixelRect(px - 1, py - 1, 3, 3, draggingLever ? 0xFFFFB020 : 0xFF8A8A9A);
+    }
+    DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
+
+    /* 하단 단축키 안내 */
+    DrawLabel(20, GAME_H - 20, "DRAG LEVER: ADJUST", 0xFFAAAAAA, 1);
+    DrawLabel(200, GAME_H - 20, "SPACE: CONFIRM", 0xFFAAAAAA, 1);
+    int escW = TextWidth("ESC: QUIT", 1);
+    DrawLabel(GAME_W - 20 - escW, GAME_H - 20, "ESC: QUIT", 0xFFAAAAAA, 1);
+}
+
+/* ---------- 메인 업데이트/렌더 ---------- */
+
+static void UpdateGame(float dt) {
+    switch (scene) {
+        case SCENE_INTRO: UpdateIntro(dt); break;
+        case SCENE_GAMEPLAY: UpdateGameplay(dt); break;
+        default: break;
+    }
+    for (int i = 0; i < 256; i++) keysPrev[i] = keys[i];
+    mouseDownPrev = mouseDown;
+}
 
 static void RenderGame(void) {
-    ClearScreen(COL_BG);
-    DrawRectOutline(10, 10, GAME_W - 20, GAME_H - 20, COL_DIM);
-
-    /* 남은 시간 */
-    int timeLeft = (int)(TIME_LIMIT - elapsed + 0.99f);
-    if (timeLeft < 0) timeLeft = 0;
-    DrawNumber(GAME_W / 2 - 12, 20, timeLeft, 2, timeLeft <= 5 ? COL_RED : COL_GREEN);
-
-    /* 방위각 다이얼 */
-    int azCx = 130, azCy = 130;
-    DrawRing(azCx, azCy, 55.0f, COL_DIM);
-    DrawRadial(azCx, azCy, azTarget, 55.0f, 66.0f, COL_AMBER);
-    DrawRadial(azCx, azCy, azCurrent, 0.0f, 46.0f,
-        stage == STAGE_AZIMUTH ? COL_GREEN : COL_DIM);
-    DrawNumber(azCx - 30, azCy + 75, (int)azTarget, 3, COL_AMBER);
-    DrawNumber(azCx + 6, azCy + 75, (int)azCurrent, 3, COL_GREEN);
-
-    /* 사각 바 게이지 */
-    int elX = 260, elY = 60, elW = 26, elH = 150;
-    DrawRectOutline(elX, elY, elW, elH, COL_DIM);
-    int fillH = (int)(elCurrent / 75.0f * (float)elH);
-    FillPixelRect(elX + 2, elY + elH - fillH, elW - 4, fillH,
-        stage == STAGE_ELEVATION ? COL_GREEN : COL_DIM);
-    int tickY = elY + elH - (int)(elTarget / 75.0f * (float)elH);
-    FillPixelRect(elX - 6, tickY, elW + 12, 2, COL_AMBER);
-    DrawNumber(elX - 4, elY + elH + 14, (int)elTarget, 2, COL_AMBER);
-    DrawNumber(elX + 22, elY + elH + 14, (int)elCurrent, 2, COL_GREEN);
-
-    /* 장약 번호 */
-    int chX = 380, chY = 60;
-    for (int i = 1; i <= 7; i++) {
-        uint32_t c = (i == chTarget) ? COL_AMBER : COL_DIM;
-        if (stage > STAGE_CHARGE && i == chResult) c = chResult == chTarget ? COL_GREEN : COL_RED;
-        DrawRectOutline(chX + (i - 1) * 26, chY, 20, 24, c);
-        DrawNumber(chX + (i - 1) * 26 + 5, chY + 3, i, 1, c);
-    }
-
-    /* 장전 타이밍 바 */
-    int ldX = 380, ldY = 140, ldW = 200, ldH = 16;
-    DrawRectOutline(ldX, ldY, ldW, ldH, COL_DIM);
-    FillPixelRect(ldX + (int)loadZoneStart, ldY, 30, ldH, 0xFF2A3A22);
-    if (stage == STAGE_LOADING) {
-        float t = fmodf(loadStageTimer, 1.2f);
-        float pos = (t < 0.6f) ? (t / 0.6f * (float)ldW) : ((1.2f - t) / 0.6f * (float)ldW);
-        FillPixelRect(ldX + (int)pos - 2, ldY - 4, 4, ldH + 8, COL_GREEN);
-    } else if (stage > STAGE_LOADING) {
-        FillPixelRect(ldX + 4, ldY + 4, ldW - 8, ldH - 8, loadHit ? COL_GREEN : COL_RED);
-    }
-
-    /* 폐쇄/뇌관 + 격발 */
-    DrawRectOutline(380, 200, 200, 30, breechDone ? COL_GREEN : COL_DIM);
-    DrawRectOutline(380, 240, 200, 30, stage == STAGE_FIRE ? COL_AMBER : COL_DIM);
-
-    /* 결과 배너 */
-    if (stage == STAGE_RESULT) {
-        uint32_t rc = missionHit ? COL_GREEN : COL_RED;
-        FillPixelRect(GAME_W / 2 - 70, GAME_H - 60, 140, 30, 0xFF000000);
-        DrawRectOutline(GAME_W / 2 - 70, GAME_H - 60, 140, 30, rc);
+    switch (scene) {
+        case SCENE_LOBBY: RenderLobby(); break;
+        case SCENE_OPTIONS: RenderLobby(); RenderOptions(); break; /* 이전 화면 위에 오버레이 */
+        case SCENE_INTRO: RenderIntro(); break;
+        case SCENE_GAMEPLAY: RenderGameplay(); break;
     }
 }
 
@@ -305,11 +350,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_DESTROY: running = FALSE; PostQuitMessage(0); return 0;
         case WM_KEYDOWN:
-            if (wp == VK_ESCAPE) running = FALSE;
             if (wp < 256) keys[wp] = TRUE;
             return 0;
         case WM_KEYUP:
             if (wp < 256) keys[wp] = FALSE;
+            return 0;
+        case WM_MOUSEMOVE:
+            mouseX = (short)LOWORD(lp);
+            mouseY = (short)HIWORD(lp);
+            return 0;
+        case WM_LBUTTONDOWN:
+            mouseDown = TRUE;
+            SetCapture(hwnd);
+            return 0;
+        case WM_LBUTTONUP:
+            mouseDown = FALSE;
+            ReleaseCapture();
             return 0;
         default: return DefWindowProc(hwnd, msg, wp, lp);
     }
@@ -344,7 +400,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     bmi.bmiHeader.biCompression = BI_RGB;
 
     HDC hdc = GetDC(hwnd);
-    NewMission();
 
     LARGE_INTEGER freq, prev, now;
     QueryPerformanceFrequency(&freq);
