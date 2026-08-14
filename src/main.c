@@ -300,9 +300,15 @@ static void UpdateGameplay(float dt) {
         leverAngle = rad * 180.0f / PI_F; /* -180..180, 0=오른쪽 */
     }
 
-    /* 우클릭: 한 번 누를 때마다 조금씩만 이동하는 미세조정 */
+    /* 우클릭: 한 번 누를 때마다 조금씩만 이동하는 미세조정.
+       화면상 좌/우가 아니라 "바늘 현재 각도 기준" 클릭 방향으로 판단해야
+       바늘이 어디를 가리키고 있어도 항상 같은 느낌으로 동작한다. */
     if (rMouseDown && !rMouseDownPrev && distToPivot <= leverPivotGrabR) {
-        leverAngle += (mouseX < leverCx) ? -LEVER_STEP : LEVER_STEP;
+        float clickAngle = atan2f((float)dy, (float)dx) * 180.0f / PI_F;
+        float diff = clickAngle - leverAngle;
+        while (diff > 180.0f) diff -= 360.0f;
+        while (diff < -180.0f) diff += 360.0f;
+        leverAngle += (diff < 0.0f) ? -LEVER_STEP : LEVER_STEP;
         if (leverAngle > 180.0f) leverAngle -= 360.0f;
         if (leverAngle < -180.0f) leverAngle += 360.0f;
         leverFlash = LEVER_FLASH_TIME;
