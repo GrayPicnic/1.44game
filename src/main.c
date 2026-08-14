@@ -7,6 +7,7 @@
  */
 
 #include <windows.h>
+#include <mmsystem.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <math.h>
@@ -44,7 +45,6 @@ static float introTimer = 0.0f;
 /* 원 한 바퀴 = 6400밀. 방위각은 여러 바퀴 돌려서 맞추고, 사각은 -44~1244밀 범위의
    세로 릴로 맞춘다 (음수 구간은 이번 프로토타입에서 스킵 -- 실사용 범위 300~1100 위주). */
 #define MIL_FULL 6400.0f
-#define AZ_TOLERANCE_MIL 8.0f
 #define AZ_FINE_STEP_MIL 5.0f
 #define AZ_GEAR_TURNS 10.0f  /* 핸들을 최대 10바퀴 돌려야 전체 범위(6400밀)를 커버 */
 #define AZ_MIL_PER_DEG (MIL_FULL / AZ_GEAR_TURNS / 360.0f)
@@ -53,7 +53,6 @@ static float introTimer = 0.0f;
 #define EL_TARGET_MAX 1100
 #define EL_ADJUST_MIN 0.0f
 #define EL_ADJUST_MAX 1244.0f
-#define EL_TOLERANCE_MIL 8.0f
 #define EL_FINE_STEP_MIL 5.0f
 #define EL_DRAG_MIL_PER_PX 4.0f
 #define EL_TICK_STEP 20
@@ -61,7 +60,9 @@ static float introTimer = 0.0f;
 #define EL_FRICTION 4.0f            /* 클수록 관성이 빨리 멈춤 */
 #define EL_VELOCITY_STOP_MIL 5.0f
 
-#define TRANS_READY_TIME 0.6f
+/* 최종 판정: 방위각 오차 + 사각 오차(밀 단위 절댓값)의 합이 이 값 이하면 명중 */
+#define TOTAL_ERROR_SUCCESS_MAX 5.0f
+
 #define TRANS_TIME 0.4f
 #define LEVER_FLASH_TIME 0.15f
 
@@ -76,7 +77,8 @@ static const float BUBBLE_PHASE_DUR[8] = {
 };
 
 typedef enum { FIRESTAGE_AZIMUTH, FIRESTAGE_ELEVATION } FireStage;
-typedef enum { TRANS_NONE, TRANS_READY, TRANS_OUT, TRANS_IN } TransState;
+typedef enum { TRANS_NONE, TRANS_OUT, TRANS_IN } TransState;
+typedef enum { RESULT_NONE, RESULT_HIT, RESULT_MISS } FinalResult;
 
 static float gpElapsed = 0.0f;
 static FireStage fireStage = FIRESTAGE_AZIMUTH;
@@ -100,6 +102,11 @@ static int lastDragMouseY = 0;
 
 static BOOL missionFailed = FALSE;
 static float failTimer = 0.0f;
+
+static float azErrorRecorded = 0.0f;
+static float elErrorRecorded = 0.0f;
+static FinalResult finalResult = RESULT_NONE;
+static float resultTimer = 0.0f;
 
 static int leverCx = 560, leverCy = 190;
 static const int leverPivotGrabR = 70;
@@ -351,6 +358,11 @@ static void EnterGameplay(void) {
     missionFailed = FALSE;
     failTimer = 0.0f;
 
+    azErrorRecorded = 0.0f;
+    elErrorRecorded = 0.0f;
+    finalResult = RESULT_NONE;
+    resultTimer = 0.0f;
+
     draggingLever = FALSE;
 }
 
@@ -369,11 +381,18 @@ static void UpdateGameplay(float dt) {
         if (failTimer >= MISSION_FAILED_HOLD_TIME) scene = SCENE_LOBBY;
         return;
     }
+    if (finalResult != RESULT_NONE && transState == TRANS_NONE) {
+        /* 최종 결과 화면 홀드 후 로비로 */
+        resultTimer += dt;
+        if (resultTimer >= MISSION_FAILED_HOLD_TIME) scene = SCENE_LOBBY;
+        return;
+    }
 
     if (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE]) { scene = SCENE_LOBBY; return; }
 
     gpElapsed += dt;
-    if (gpElapsed >= GAMEPLAY_TIME_LIMIT) {
+    /* 이미 스페이스로 확정하고 전환 중이면 막판에 타임오버로 덮어쓰지 않는다 */
+    if (gpElapsed >= GAMEPLAY_TIME_LIMIT && transState == TRANS_NONE && finalResult == RESULT_NONE) {
         missionFailed = TRUE;
         failTimer = 0.0f;
         return;
@@ -389,12 +408,7 @@ static void UpdateGameplay(float dt) {
 
     if (leverFlash > 0.0f) leverFlash -= dt;
 
-    /* 판정 성공 -> "READY" 홀드 -> 페이드아웃 -> (다음 스테이지면 페이드인, 마지막이면 로비로) */
-    if (transState == TRANS_READY) {
-        transTimer += dt;
-        if (transTimer >= TRANS_READY_TIME) { transState = TRANS_OUT; transTimer = 0.0f; }
-        return;
-    }
+    /* 스페이스로 확정 -> 페이드아웃 -> (다음 스테이지면 페이드인, 마지막이면 최종판정 후 페이드인) */
     if (transState == TRANS_OUT) {
         transTimer += dt;
         if (transTimer >= TRANS_TIME) {
@@ -405,8 +419,10 @@ static void UpdateGameplay(float dt) {
                 transState = TRANS_IN;
                 transTimer = 0.0f;
             } else {
-                scene = SCENE_LOBBY; /* 두 스테이지 모두 완료 */
-                transState = TRANS_NONE;
+                float totalError = azErrorRecorded + elErrorRecorded;
+                finalResult = (totalError <= TOTAL_ERROR_SUCCESS_MAX) ? RESULT_HIT : RESULT_MISS;
+                transState = TRANS_IN;
+                transTimer = 0.0f;
             }
         }
         return;
@@ -450,9 +466,11 @@ static void UpdateGameplay(float dt) {
             leverFlash = LEVER_FLASH_TIME;
         }
 
-        float azCurrentMil = NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
-        if (MilDiff(azCurrentMil, (float)azTargetMil) <= AZ_TOLERANCE_MIL) {
-            transState = TRANS_READY;
+        /* 스페이스: 지금 값을 확정 (허용오차 안이든 아니든 일단 확정하고, 최종 판정은 두 값 합산으로) */
+        if (keys[VK_SPACE] && !keysPrev[VK_SPACE]) {
+            float azCurrentMil = NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
+            azErrorRecorded = MilDiff(azCurrentMil, (float)azTargetMil);
+            transState = TRANS_OUT;
             transTimer = 0.0f;
             draggingLever = FALSE;
         }
@@ -494,8 +512,10 @@ static void UpdateGameplay(float dt) {
             leverFlash = LEVER_FLASH_TIME;
         }
 
-        if (fabsf(elCurrentMil - (float)elTargetMil) <= EL_TOLERANCE_MIL) {
-            transState = TRANS_READY;
+        /* 스페이스: 지금 값을 확정 -- 이게 마지막 스테이지라 최종 판정으로 이어짐 */
+        if (keys[VK_SPACE] && !keysPrev[VK_SPACE]) {
+            elErrorRecorded = fabsf(elCurrentMil - (float)elTargetMil);
+            transState = TRANS_OUT;
             transTimer = 0.0f;
             draggingLever = FALSE;
             elVelocity = 0.0f;
@@ -511,87 +531,91 @@ static void RenderGameplay(void) {
         DrawLabel(GAME_W / 2 - tw / 2, GAME_H / 2 - 14, msg, 0xFFFF3030, 4);
         return;
     }
-    ClearScreen(0xFF161B12); /* bg placeholder */
 
-    /* 좌측 숫자 말풍선 -- 현재 스테이지 목표값(4자리)을 자릿수 단위로 불러줌.
-       스테이지가 바뀌면 자동으로 방위각->사각 콜아웃으로 전환된다 (컴포넌트는 계속 유지) */
-    int bubbleTarget = (fireStage == FIRESTAGE_AZIMUTH) ? azTargetMil : elTargetMil;
-    if (bubblePhase % 2 == 0) {
-        FillPixelRect(30, 130, 110, 100, 0xFF6A2540);
-        DrawRectOutline(30, 130, 110, 100, 0xFFEEEEEE);
-        int digits[4] = {
-            (bubbleTarget / 1000) % 10, (bubbleTarget / 100) % 10,
-            (bubbleTarget / 10) % 10, bubbleTarget % 10
-        };
-        DrawNumber(30 + 40, 130 + 40, digits[bubblePhase / 2], 1, 0xFFFFFFFF);
-    }
-
-    /* 상단 타이머 게이지 -- 스테이지 전환과 무관하게 계속 흐름 */
-    float timeLeft = GAMEPLAY_TIME_LIMIT - gpElapsed;
-    if (timeLeft < 0.0f) timeLeft = 0.0f;
-    int barW = 300, barH = 14, barX = GAME_W / 2 - barW / 2, barY = 16;
-    DrawRectOutline(barX, barY, barW, barH, 0xFFAAAAAA);
-    int fillW = (int)(timeLeft / GAMEPLAY_TIME_LIMIT * (float)(barW - 4));
-    if (fillW < 0) fillW = 0;
-    BOOL lowTime = timeLeft <= 5.0f;
-    BOOL blinkOn = fmodf(gpElapsed, 0.4f) < 0.2f;
-    uint32_t gaugeColor = lowTime ? (blinkOn ? 0xFFFF4433 : 0xFF662222) : 0xFF3CFF6E;
-    FillPixelRect(barX + 2, barY + 2, fillW, barH - 4, gaugeColor);
-    DrawNumber(barX + barW + 12, barY - 2, (int)(timeLeft + 0.99f), 2, lowTime ? 0xFFFF4433 : 0xFF3CFF6E);
-
-    /* 중앙 숫자판 */
-    FillPixelRect(230, 140, 160, 100, 0xFF1E2A4A);
-    DrawRectOutline(230, 140, 160, 100, 0xFFEEEEEE);
-    if (fireStage == FIRESTAGE_AZIMUTH) {
-        DrawLabel(245, 150, "AZIMUTH MIL", 0xFF88AACC, 1);
-        int curMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
-        DrawNumber(255, 190, curMil, 4, 0xFF3CFF6E);
-    } else {
-        DrawLabel(240, 150, "ELEVATION MIL", 0xFF88AACC, 1);
-        DrawNumber(255, 190, (int)(elCurrentMil + 0.5f), 4, 0xFF3CFF6E);
-    }
-
-    /* 우측 조작부 -- 방위각: 여러 바퀴 도는 회전 다이얼 / 사각: 화살표 고정 세로 릴 */
-    if (fireStage == FIRESTAGE_AZIMUTH) {
-        DrawRing(leverCx, leverCy, 8.0f, 0xFF8A8A9A);
-        float visualDeg = fmodf(azAngleDeg, 360.0f);
-        float rad = visualDeg * PI_F / 180.0f;
-        int hx = leverCx + (int)(cosf(rad) * 60.0f);
-        int hy = leverCy + (int)(sinf(rad) * 60.0f);
-        for (float t = 0.0f; t <= 1.0f; t += 0.02f) {
-            int px = leverCx + (int)((hx - leverCx) * t);
-            int py = leverCy + (int)((hy - leverCy) * t);
-            FillPixelRect(px - 1, py - 1, 3, 3, (draggingLever || leverFlash > 0.0f) ? 0xFFFFB020 : 0xFF8A8A9A);
-        }
-        DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
-    } else {
-        int reelX = leverCx, reelTop = leverCy - 90, reelH = 180;
-        DrawRectOutline(reelX - 30, reelTop, 60, reelH, 0xFF333333);
-        for (int step = -3; step <= 3; step++) {
-            int tickMil = ((int)(elCurrentMil) / EL_TICK_STEP + step) * EL_TICK_STEP;
-            if (tickMil < 0 || tickMil > (int)EL_ADJUST_MAX) continue;
-            float screenY = (float)leverCy - ((float)tickMil - elCurrentMil) * EL_PX_PER_MIL;
-            if (screenY < (float)reelTop - 10.0f || screenY > (float)(reelTop + reelH) + 10.0f) continue;
-            DrawNumber(reelX - 24, (int)screenY - 8, tickMil, 4, 0xFF8FB0D0);
-        }
-        DrawArrowRight(reelX - 34, leverCy, 10, (draggingLever || leverFlash > 0.0f) ? 0xFFFFB020 : 0xFFEEEEEE);
-        DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
-    }
-
-    /* 하단 단축키 안내 -- 두 스테이지 공통, 계속 유지 */
-    DrawLabel(20, GAME_H - 32, "DRAG: COARSE", 0xFFAAAAAA, 1);
-    DrawLabel(20, GAME_H - 20, "R-CLICK: FINE-ADJUST", 0xFFAAAAAA, 1);
-    DrawLabel(200, GAME_H - 20, "SPACE: CONFIRM", 0xFFAAAAAA, 1);
-    int escW = TextWidth("ESC: QUIT", 1);
-    DrawLabel(GAME_W - 20 - escW, GAME_H - 20, "ESC: QUIT", 0xFFAAAAAA, 1);
-
-    /* 판정 성공: 화면 중앙에 READY 표시 -> 검정 페이드아웃 -> (다음 스테이지면 페이드인) */
-    if (transState == TRANS_READY) {
-        const char *msg = "READY";
+    if (finalResult != RESULT_NONE) {
+        ClearScreen(0xFF000000);
+        const char *msg = (finalResult == RESULT_HIT) ? "TARGET HIT" : "MISSION FAILED";
+        uint32_t col = (finalResult == RESULT_HIT) ? 0xFF3CFF6E : 0xFFFF3030;
         int tw = TextWidth(msg, 4);
-        FillPixelRectAlpha(GAME_W / 2 - tw / 2 - 20, GAME_H / 2 - 30, tw + 40, 60, 0x000000, 0.55f);
-        DrawLabel(GAME_W / 2 - tw / 2, GAME_H / 2 - 14, msg, 0xFF3CFF6E, 4);
-    } else if (transState == TRANS_OUT) {
+        DrawLabel(GAME_W / 2 - tw / 2, GAME_H / 2 - 14, msg, col, 4);
+    } else {
+        ClearScreen(0xFF161B12); /* bg placeholder */
+
+        /* 좌측 숫자 말풍선 -- 현재 스테이지 목표값(4자리)을 자릿수 단위로 불러줌.
+           스테이지가 바뀌면 자동으로 방위각->사각 콜아웃으로 전환된다 (컴포넌트는 계속 유지) */
+        int bubbleTarget = (fireStage == FIRESTAGE_AZIMUTH) ? azTargetMil : elTargetMil;
+        if (bubblePhase % 2 == 0) {
+            FillPixelRect(30, 130, 110, 100, 0xFF6A2540);
+            DrawRectOutline(30, 130, 110, 100, 0xFFEEEEEE);
+            int digits[4] = {
+                (bubbleTarget / 1000) % 10, (bubbleTarget / 100) % 10,
+                (bubbleTarget / 10) % 10, bubbleTarget % 10
+            };
+            DrawNumber(30 + 40, 130 + 40, digits[bubblePhase / 2], 1, 0xFFFFFFFF);
+        }
+
+        /* 상단 타이머 게이지 -- 스테이지 전환과 무관하게 계속 흐름 */
+        float timeLeft = GAMEPLAY_TIME_LIMIT - gpElapsed;
+        if (timeLeft < 0.0f) timeLeft = 0.0f;
+        int barW = 300, barH = 14, barX = GAME_W / 2 - barW / 2, barY = 16;
+        DrawRectOutline(barX, barY, barW, barH, 0xFFAAAAAA);
+        int fillW = (int)(timeLeft / GAMEPLAY_TIME_LIMIT * (float)(barW - 4));
+        if (fillW < 0) fillW = 0;
+        BOOL lowTime = timeLeft <= 5.0f;
+        BOOL blinkOn = fmodf(gpElapsed, 0.4f) < 0.2f;
+        uint32_t gaugeColor = lowTime ? (blinkOn ? 0xFFFF4433 : 0xFF662222) : 0xFF3CFF6E;
+        FillPixelRect(barX + 2, barY + 2, fillW, barH - 4, gaugeColor);
+        DrawNumber(barX + barW + 12, barY - 2, (int)(timeLeft + 0.99f), 2, lowTime ? 0xFFFF4433 : 0xFF3CFF6E);
+
+        /* 중앙 숫자판 */
+        FillPixelRect(230, 140, 160, 100, 0xFF1E2A4A);
+        DrawRectOutline(230, 140, 160, 100, 0xFFEEEEEE);
+        if (fireStage == FIRESTAGE_AZIMUTH) {
+            DrawLabel(245, 150, "AZIMUTH MIL", 0xFF88AACC, 1);
+            int curMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
+            DrawNumber(255, 190, curMil, 4, 0xFF3CFF6E);
+        } else {
+            DrawLabel(240, 150, "ELEVATION MIL", 0xFF88AACC, 1);
+            DrawNumber(255, 190, (int)(elCurrentMil + 0.5f), 4, 0xFF3CFF6E);
+        }
+
+        /* 우측 조작부 -- 방위각: 여러 바퀴 도는 회전 다이얼 / 사각: 화살표 고정 세로 릴 */
+        if (fireStage == FIRESTAGE_AZIMUTH) {
+            DrawRing(leverCx, leverCy, 8.0f, 0xFF8A8A9A);
+            float visualDeg = fmodf(azAngleDeg, 360.0f);
+            float rad = visualDeg * PI_F / 180.0f;
+            int hx = leverCx + (int)(cosf(rad) * 60.0f);
+            int hy = leverCy + (int)(sinf(rad) * 60.0f);
+            for (float t = 0.0f; t <= 1.0f; t += 0.02f) {
+                int px = leverCx + (int)((hx - leverCx) * t);
+                int py = leverCy + (int)((hy - leverCy) * t);
+                FillPixelRect(px - 1, py - 1, 3, 3, (draggingLever || leverFlash > 0.0f) ? 0xFFFFB020 : 0xFF8A8A9A);
+            }
+            DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
+        } else {
+            int reelX = leverCx, reelTop = leverCy - 130, reelH = 260;
+            DrawRectOutline(reelX - 30, reelTop, 60, reelH, 0xFF333333);
+            for (int step = -6; step <= 6; step++) {
+                int tickMil = ((int)(elCurrentMil) / EL_TICK_STEP + step) * EL_TICK_STEP;
+                if (tickMil < 0 || tickMil > (int)EL_ADJUST_MAX) continue;
+                float screenY = (float)leverCy - ((float)tickMil - elCurrentMil) * EL_PX_PER_MIL;
+                if (screenY < (float)reelTop - 10.0f || screenY > (float)(reelTop + reelH) + 10.0f) continue;
+                DrawNumber(reelX - 24, (int)screenY - 8, tickMil, 4, 0xFF8FB0D0);
+            }
+            DrawArrowRight(reelX - 34, leverCy, 10, (draggingLever || leverFlash > 0.0f) ? 0xFFFFB020 : 0xFFEEEEEE);
+            DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
+        }
+
+        /* 하단 단축키 안내 -- 두 스테이지 공통, 계속 유지 */
+        DrawLabel(20, GAME_H - 32, "DRAG: COARSE", 0xFFAAAAAA, 1);
+        DrawLabel(20, GAME_H - 20, "R-CLICK: FINE-ADJUST", 0xFFAAAAAA, 1);
+        DrawLabel(200, GAME_H - 20, "SPACE: CONFIRM", 0xFFAAAAAA, 1);
+        int escW = TextWidth("ESC: QUIT", 1);
+        DrawLabel(GAME_W - 20 - escW, GAME_H - 20, "ESC: QUIT", 0xFFAAAAAA, 1);
+    }
+
+    /* 스테이지/결과 전환 시 검정화면 페이드 인/아웃 (결과 화면도 이걸로 페이드인됨) */
+    if (transState == TRANS_OUT) {
         FillPixelRectAlpha(0, 0, GAME_W, GAME_H, 0x000000, transTimer / TRANS_TIME);
     } else if (transState == TRANS_IN) {
         FillPixelRectAlpha(0, 0, GAME_W, GAME_H, 0x000000, 1.0f - (transTimer / TRANS_TIME));
@@ -655,6 +679,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     (void)hPrev; (void)cmdLine;
     srand(GetTickCount());
 
+    /* Windows 기본 타이머 해상도(보통 ~15ms)에서는 Sleep(1)이 실제로 훨씬 오래 걸려
+       프레임이 낮아 보인다. 1ms 해상도를 요청해서 프레임 페이싱을 촘촘하게 만든다.
+       실행파일 크기엔 영향 없음(가져오는 함수 몇 개 추가되는 수준). */
+    timeBeginPeriod(1);
+
     WNDCLASSA wc = {0};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
@@ -713,5 +742,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
         Sleep(1);
     }
     ReleaseDC(hwnd, hdc);
+    timeEndPeriod(1);
     return 0;
 }

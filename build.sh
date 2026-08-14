@@ -14,7 +14,7 @@ mkdir -p dist
     -mwindows \
     -o "$OUT" \
     src/main.c \
-    -lgdi32 -luser32 -lkernel32 -lm
+    -lgdi32 -luser32 -lkernel32 -lm -lwinmm
 
 echo "빌드 완료: $OUT"
 ls -lh "$OUT"
