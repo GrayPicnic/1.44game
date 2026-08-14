@@ -57,6 +57,7 @@ static int bubblePhase = 0;       /* 0..5, 짝수=표시 홀수=공백. BUBBLE_P
 static float bubbleTimer = 0.0f;
 static float leverAngle = 90.0f;
 static float leverFlash = 0.0f;
+static BOOL draggingLever = FALSE;
 static int leverCx = 560, leverCy = 190;
 static const int leverPivotGrabR = 70;
 
@@ -284,9 +285,22 @@ static void UpdateGameplay(float dt) {
 
     if (leverFlash > 0.0f) leverFlash -= dt;
 
-    /* 레버 우클릭식 미세조정: 축 왼쪽 클릭하면 감소, 오른쪽 클릭하면 증가 */
     int dx = mouseX - leverCx, dy = mouseY - leverCy;
     float distToPivot = sqrtf((float)(dx * dx + dy * dy));
+
+    /* 좌클릭 드래그: 큰 폭으로 빠르게 돌리기 (러프 방열) */
+    if (mouseDown && !mouseDownPrev && distToPivot <= leverPivotGrabR) {
+        draggingLever = TRUE;
+    }
+    if (!mouseDown) {
+        draggingLever = FALSE;
+    }
+    if (draggingLever) {
+        float rad = atan2f((float)dy, (float)dx);
+        leverAngle = rad * 180.0f / PI_F; /* -180..180, 0=오른쪽 */
+    }
+
+    /* 우클릭: 한 번 누를 때마다 조금씩만 이동하는 미세조정 */
     if (rMouseDown && !rMouseDownPrev && distToPivot <= leverPivotGrabR) {
         leverAngle += (mouseX < leverCx) ? -LEVER_STEP : LEVER_STEP;
         if (leverAngle > 180.0f) leverAngle -= 360.0f;
@@ -334,12 +348,13 @@ static void RenderGameplay(void) {
     for (float t = 0.0f; t <= 1.0f; t += 0.02f) {
         int px = leverCx + (int)((hx - leverCx) * t);
         int py = leverCy + (int)((hy - leverCy) * t);
-        FillPixelRect(px - 1, py - 1, 3, 3, leverFlash > 0.0f ? 0xFFFFB020 : 0xFF8A8A9A);
+        FillPixelRect(px - 1, py - 1, 3, 3, (draggingLever || leverFlash > 0.0f) ? 0xFFFFB020 : 0xFF8A8A9A);
     }
     DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
 
     /* 하단 단축키 안내 */
-    DrawLabel(20, GAME_H - 20, "RIGHT-CLICK LEVER: FINE-ADJUST", 0xFFAAAAAA, 1);
+    DrawLabel(20, GAME_H - 32, "DRAG LEVER: COARSE", 0xFFAAAAAA, 1);
+    DrawLabel(20, GAME_H - 20, "R-CLICK LEVER: FINE-ADJUST", 0xFFAAAAAA, 1);
     DrawLabel(200, GAME_H - 20, "SPACE: CONFIRM", 0xFFAAAAAA, 1);
     int escW = TextWidth("ESC: QUIT", 1);
     DrawLabel(GAME_W - 20 - escW, GAME_H - 20, "ESC: QUIT", 0xFFAAAAAA, 1);
