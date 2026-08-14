@@ -46,7 +46,7 @@ static float introTimer = 0.0f;
    세로 릴로 맞춘다 (음수 구간은 이번 프로토타입에서 스킵 -- 실사용 범위 300~1100 위주). */
 #define MIL_FULL 6400.0f
 #define AZ_FINE_STEP_MIL 1.0f
-#define AZ_GEAR_TURNS 10.0f  /* 핸들을 최대 10바퀴 돌려야 전체 범위(6400밀)를 커버 */
+#define AZ_GEAR_TURNS 20.0f  /* 핸들을 최대 20바퀴 돌려야 전체 범위(6400밀)를 커버 */
 #define AZ_MIL_PER_DEG (MIL_FULL / AZ_GEAR_TURNS / 360.0f)
 
 #define EL_TARGET_MIN 300
@@ -54,9 +54,9 @@ static float introTimer = 0.0f;
 #define EL_ADJUST_MIN 0.0f
 #define EL_ADJUST_MAX 1244.0f
 #define EL_FINE_STEP_MIL 1.0f
-#define EL_DRAG_MIL_PER_PX 4.0f
-#define EL_TICK_STEP 10             /* 눈금 촘촘하게 -- 관성 스크롤이 더 매끄럽게 보임 */
-#define EL_PX_PER_MIL 2.4f
+#define EL_DRAG_MIL_PER_PX 1.0f     /* 예전엔 4밀/px라 살짝만 끌어도 확 튀었음 -- 1:1로 완화 */
+#define EL_TICK_STEP 1              /* 1밀 단위로 하나하나 보이게 */
+#define EL_PX_PER_MIL 24.0f         /* 눈금이 1밀 간격이라 라벨 안 겹치게 픽셀 간격을 넉넉히 */
 #define EL_FRICTION 4.0f            /* 클수록 관성이 빨리 멈춤 */
 #define EL_VELOCITY_STOP_MIL 5.0f
 #define EL_GRAB_HALF_W 30           /* 드래그 시작 판정 영역 (릴 폭에 맞춤) */
