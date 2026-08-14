@@ -46,6 +46,8 @@ static float introTimer = 0.0f;
 #define MIL_FULL 6400.0f
 #define AZ_TOLERANCE_MIL 8.0f
 #define AZ_FINE_STEP_MIL 5.0f
+#define AZ_GEAR_TURNS 10.0f  /* 핸들을 최대 10바퀴 돌려야 전체 범위(6400밀)를 커버 */
+#define AZ_MIL_PER_DEG (MIL_FULL / AZ_GEAR_TURNS / 360.0f)
 
 #define EL_TARGET_MIN 300
 #define EL_TARGET_MAX 1100
@@ -56,7 +58,10 @@ static float introTimer = 0.0f;
 #define EL_DRAG_MIL_PER_PX 4.0f
 #define EL_TICK_STEP 20
 #define EL_PX_PER_MIL 1.2f
+#define EL_FRICTION 4.0f            /* 클수록 관성이 빨리 멈춤 */
+#define EL_VELOCITY_STOP_MIL 5.0f
 
+#define TRANS_READY_TIME 0.6f
 #define TRANS_TIME 0.4f
 #define LEVER_FLASH_TIME 0.15f
 
@@ -71,7 +76,7 @@ static const float BUBBLE_PHASE_DUR[8] = {
 };
 
 typedef enum { FIRESTAGE_AZIMUTH, FIRESTAGE_ELEVATION } FireStage;
-typedef enum { TRANS_NONE, TRANS_OUT, TRANS_IN } TransState;
+typedef enum { TRANS_NONE, TRANS_READY, TRANS_OUT, TRANS_IN } TransState;
 
 static float gpElapsed = 0.0f;
 static FireStage fireStage = FIRESTAGE_AZIMUTH;
@@ -83,6 +88,7 @@ static float azAngleDeg = 0.0f;    /* 무제한 누적 회전각(도) -- 여러 
 
 static int elTargetMil = 0;
 static float elCurrentMil = 0.0f;  /* 0..1244 */
+static float elVelocity = 0.0f;    /* mil/sec -- 드래그 놓은 뒤 관성 감속용 */
 
 static int bubblePhase = 0;        /* 0..7, 짝수=표시 홀수=공백. BUBBLE_PHASE_DUR 참고 */
 static float bubbleTimer = 0.0f;
@@ -94,8 +100,6 @@ static int lastDragMouseY = 0;
 
 static BOOL missionFailed = FALSE;
 static float failTimer = 0.0f;
-static BOOL missionComplete = FALSE;
-static float completeTimer = 0.0f;
 
 static int leverCx = 560, leverCy = 190;
 static const int leverPivotGrabR = 70;
@@ -339,14 +343,13 @@ static void EnterGameplay(void) {
 
     elTargetMil = EL_TARGET_MIN + rand() % (EL_TARGET_MAX - EL_TARGET_MIN + 1);
     elCurrentMil = 0.0f;
+    elVelocity = 0.0f;
 
     bubblePhase = 0;
     bubbleTimer = 0.0f;
 
     missionFailed = FALSE;
     failTimer = 0.0f;
-    missionComplete = FALSE;
-    completeTimer = 0.0f;
 
     draggingLever = FALSE;
 }
@@ -364,11 +367,6 @@ static void UpdateGameplay(float dt) {
         /* 조작 불가 -- 검정화면 홀드 후 로비로 */
         failTimer += dt;
         if (failTimer >= MISSION_FAILED_HOLD_TIME) scene = SCENE_LOBBY;
-        return;
-    }
-    if (missionComplete) {
-        completeTimer += dt;
-        if (completeTimer >= MISSION_FAILED_HOLD_TIME) scene = SCENE_LOBBY;
         return;
     }
 
@@ -391,15 +389,25 @@ static void UpdateGameplay(float dt) {
 
     if (leverFlash > 0.0f) leverFlash -= dt;
 
-    /* 스테이지 전환 페이드 중엔 조작 막고 타이머만 흐르게 둔다 */
+    /* 판정 성공 -> "READY" 홀드 -> 페이드아웃 -> (다음 스테이지면 페이드인, 마지막이면 로비로) */
+    if (transState == TRANS_READY) {
+        transTimer += dt;
+        if (transTimer >= TRANS_READY_TIME) { transState = TRANS_OUT; transTimer = 0.0f; }
+        return;
+    }
     if (transState == TRANS_OUT) {
         transTimer += dt;
         if (transTimer >= TRANS_TIME) {
-            fireStage = FIRESTAGE_ELEVATION;
-            bubblePhase = 0;
-            bubbleTimer = 0.0f;
-            transState = TRANS_IN;
-            transTimer = 0.0f;
+            if (fireStage == FIRESTAGE_AZIMUTH) {
+                fireStage = FIRESTAGE_ELEVATION;
+                bubblePhase = 0;
+                bubbleTimer = 0.0f;
+                transState = TRANS_IN;
+                transTimer = 0.0f;
+            } else {
+                scene = SCENE_LOBBY; /* 두 스테이지 모두 완료 */
+                transState = TRANS_NONE;
+            }
         }
         return;
     }
@@ -413,7 +421,7 @@ static void UpdateGameplay(float dt) {
     float distToPivot = sqrtf((float)(dx * dx + dy * dy));
 
     if (fireStage == FIRESTAGE_AZIMUTH) {
-        /* 좌클릭 드래그: 360도로 안 끊기고 여러 바퀴 돌린 만큼 누적됨 (러프 방열) */
+        /* 좌클릭 드래그: 기어비 적용 -- 전체 범위(6400밀)를 커버하려면 최대 10바퀴 돌려야 함 */
         if (mouseDown && !mouseDownPrev && distToPivot <= leverPivotGrabR) {
             draggingLever = TRUE;
             lastDragAngle = atan2f((float)dy, (float)dx) * 180.0f / PI_F;
@@ -428,7 +436,7 @@ static void UpdateGameplay(float dt) {
             lastDragAngle = curAngle;
         }
 
-        /* 우클릭: 바늘 현재 각도 기준 미세조정 (밀 단위 스텝) */
+        /* 우클릭: 바늘 현재 각도 기준 미세조정 (밀 단위 스텝, 기어비 반영) */
         if (rMouseDown && !rMouseDownPrev && distToPivot <= leverPivotGrabR) {
             float needleDeg = fmodf(azAngleDeg, 360.0f);
             if (needleDeg > 180.0f) needleDeg -= 360.0f;
@@ -437,14 +445,14 @@ static void UpdateGameplay(float dt) {
             float diff = clickAngle - needleDeg;
             while (diff > 180.0f) diff -= 360.0f;
             while (diff < -180.0f) diff += 360.0f;
-            float stepDeg = AZ_FINE_STEP_MIL * (360.0f / MIL_FULL);
+            float stepDeg = AZ_FINE_STEP_MIL / AZ_MIL_PER_DEG;
             azAngleDeg += (diff < 0.0f) ? stepDeg : -stepDeg; /* 시계방향 클릭=감소, 반시계=증가 */
             leverFlash = LEVER_FLASH_TIME;
         }
 
-        float azCurrentMil = NormalizeMil(azAngleDeg * (MIL_FULL / 360.0f));
+        float azCurrentMil = NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
         if (MilDiff(azCurrentMil, (float)azTargetMil) <= AZ_TOLERANCE_MIL) {
-            transState = TRANS_OUT;
+            transState = TRANS_READY;
             transTimer = 0.0f;
             draggingLever = FALSE;
         }
@@ -452,18 +460,34 @@ static void UpdateGameplay(float dt) {
         if (mouseDown && !mouseDownPrev && distToPivot <= leverPivotGrabR) {
             draggingLever = TRUE;
             lastDragMouseY = mouseY;
+            elVelocity = 0.0f;
         }
-        if (!mouseDown) draggingLever = FALSE;
+        if (draggingLever && !mouseDown) draggingLever = FALSE;
+
         if (draggingLever) {
-            int deltaY = lastDragMouseY - mouseY; /* 위로 끌면 값 증가 */
-            elCurrentMil += (float)deltaY * EL_DRAG_MIL_PER_PX;
+            /* 반대 방향: 아래로 끌면 증가, 위로 끌면 감소 */
+            int deltaY = mouseY - lastDragMouseY;
+            float deltaMil = (float)deltaY * EL_DRAG_MIL_PER_PX;
+            elCurrentMil += deltaMil;
             lastDragMouseY = mouseY;
-            if (elCurrentMil < EL_ADJUST_MIN) elCurrentMil = EL_ADJUST_MIN;
-            if (elCurrentMil > EL_ADJUST_MAX) elCurrentMil = EL_ADJUST_MAX;
+            if (dt > 0.0001f) elVelocity = elVelocity * 0.7f + (deltaMil / dt) * 0.3f;
+            if (elCurrentMil < EL_ADJUST_MIN) { elCurrentMil = EL_ADJUST_MIN; elVelocity = 0.0f; }
+            if (elCurrentMil > EL_ADJUST_MAX) { elCurrentMil = EL_ADJUST_MAX; elVelocity = 0.0f; }
+        } else if (fabsf(elVelocity) > EL_VELOCITY_STOP_MIL) {
+            /* 손 뗀 뒤 관성으로 계속 미끄러지다가 마찰로 서서히 멈춤 (휴대폰 슬라이드 느낌) */
+            elCurrentMil += elVelocity * dt;
+            float decay = 1.0f - EL_FRICTION * dt;
+            if (decay < 0.0f) decay = 0.0f;
+            elVelocity *= decay;
+            if (elCurrentMil < EL_ADJUST_MIN) { elCurrentMil = EL_ADJUST_MIN; elVelocity = 0.0f; }
+            if (elCurrentMil > EL_ADJUST_MAX) { elCurrentMil = EL_ADJUST_MAX; elVelocity = 0.0f; }
+        } else {
+            elVelocity = 0.0f;
         }
 
-        /* 우클릭: 화살표보다 위 클릭하면 증가, 아래 클릭하면 감소 */
+        /* 우클릭: 화살표보다 위 클릭하면 증가, 아래 클릭하면 감소 -- 관성도 멈춤 */
         if (rMouseDown && !rMouseDownPrev && distToPivot <= leverPivotGrabR) {
+            elVelocity = 0.0f;
             elCurrentMil += (dy < 0) ? EL_FINE_STEP_MIL : -EL_FINE_STEP_MIL;
             if (elCurrentMil < EL_ADJUST_MIN) elCurrentMil = EL_ADJUST_MIN;
             if (elCurrentMil > EL_ADJUST_MAX) elCurrentMil = EL_ADJUST_MAX;
@@ -471,9 +495,10 @@ static void UpdateGameplay(float dt) {
         }
 
         if (fabsf(elCurrentMil - (float)elTargetMil) <= EL_TOLERANCE_MIL) {
-            missionComplete = TRUE;
-            completeTimer = 0.0f;
+            transState = TRANS_READY;
+            transTimer = 0.0f;
             draggingLever = FALSE;
+            elVelocity = 0.0f;
         }
     }
 }
@@ -486,14 +511,6 @@ static void RenderGameplay(void) {
         DrawLabel(GAME_W / 2 - tw / 2, GAME_H / 2 - 14, msg, 0xFFFF3030, 4);
         return;
     }
-    if (missionComplete) {
-        ClearScreen(0xFF000000);
-        const char *msg = "FIRE MISSION READY";
-        int tw = TextWidth(msg, 3);
-        DrawLabel(GAME_W / 2 - tw / 2, GAME_H / 2 - 11, msg, 0xFF3CFF6E, 3);
-        return;
-    }
-
     ClearScreen(0xFF161B12); /* bg placeholder */
 
     /* 좌측 숫자 말풍선 -- 현재 스테이지 목표값(4자리)을 자릿수 단위로 불러줌.
@@ -527,7 +544,7 @@ static void RenderGameplay(void) {
     DrawRectOutline(230, 140, 160, 100, 0xFFEEEEEE);
     if (fireStage == FIRESTAGE_AZIMUTH) {
         DrawLabel(245, 150, "AZIMUTH MIL", 0xFF88AACC, 1);
-        int curMil = (int)NormalizeMil(azAngleDeg * (MIL_FULL / 360.0f));
+        int curMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
         DrawNumber(255, 190, curMil, 4, 0xFF3CFF6E);
     } else {
         DrawLabel(240, 150, "ELEVATION MIL", 0xFF88AACC, 1);
@@ -568,8 +585,13 @@ static void RenderGameplay(void) {
     int escW = TextWidth("ESC: QUIT", 1);
     DrawLabel(GAME_W - 20 - escW, GAME_H - 20, "ESC: QUIT", 0xFFAAAAAA, 1);
 
-    /* 스테이지 전환 시 검정화면 페이드 인/아웃 */
-    if (transState == TRANS_OUT) {
+    /* 판정 성공: 화면 중앙에 READY 표시 -> 검정 페이드아웃 -> (다음 스테이지면 페이드인) */
+    if (transState == TRANS_READY) {
+        const char *msg = "READY";
+        int tw = TextWidth(msg, 4);
+        FillPixelRectAlpha(GAME_W / 2 - tw / 2 - 20, GAME_H / 2 - 30, tw + 40, 60, 0x000000, 0.55f);
+        DrawLabel(GAME_W / 2 - tw / 2, GAME_H / 2 - 14, msg, 0xFF3CFF6E, 4);
+    } else if (transState == TRANS_OUT) {
         FillPixelRectAlpha(0, 0, GAME_W, GAME_H, 0x000000, transTimer / TRANS_TIME);
     } else if (transState == TRANS_IN) {
         FillPixelRectAlpha(0, 0, GAME_W, GAME_H, 0x000000, 1.0f - (transTimer / TRANS_TIME));
