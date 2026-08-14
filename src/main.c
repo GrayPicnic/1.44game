@@ -45,7 +45,7 @@ static float introTimer = 0.0f;
 /* 원 한 바퀴 = 6400밀. 방위각은 여러 바퀴 돌려서 맞추고, 사각은 -44~1244밀 범위의
    세로 릴로 맞춘다 (음수 구간은 이번 프로토타입에서 스킵 -- 실사용 범위 300~1100 위주). */
 #define MIL_FULL 6400.0f
-#define AZ_FINE_STEP_MIL 5.0f
+#define AZ_FINE_STEP_MIL 1.0f
 #define AZ_GEAR_TURNS 10.0f  /* 핸들을 최대 10바퀴 돌려야 전체 범위(6400밀)를 커버 */
 #define AZ_MIL_PER_DEG (MIL_FULL / AZ_GEAR_TURNS / 360.0f)
 
@@ -53,12 +53,14 @@ static float introTimer = 0.0f;
 #define EL_TARGET_MAX 1100
 #define EL_ADJUST_MIN 0.0f
 #define EL_ADJUST_MAX 1244.0f
-#define EL_FINE_STEP_MIL 5.0f
+#define EL_FINE_STEP_MIL 1.0f
 #define EL_DRAG_MIL_PER_PX 4.0f
-#define EL_TICK_STEP 20
-#define EL_PX_PER_MIL 1.2f
+#define EL_TICK_STEP 10             /* 눈금 촘촘하게 -- 관성 스크롤이 더 매끄럽게 보임 */
+#define EL_PX_PER_MIL 2.4f
 #define EL_FRICTION 4.0f            /* 클수록 관성이 빨리 멈춤 */
 #define EL_VELOCITY_STOP_MIL 5.0f
+#define EL_GRAB_HALF_W 30           /* 드래그 시작 판정 영역 (릴 폭에 맞춤) */
+#define EL_GRAB_HALF_H 150          /* 위아래로 넉넉하게 -- 릴 높이(260)보다 살짝 더 */
 
 /* 최종 판정: 방위각 오차 + 사각 오차(밀 단위 절댓값)의 합이 이 값 이하면 명중 */
 #define TOTAL_ERROR_SUCCESS_MAX 5.0f
@@ -475,7 +477,9 @@ static void UpdateGameplay(float dt) {
             draggingLever = FALSE;
         }
     } else { /* FIRESTAGE_ELEVATION -- 세로 릴, 화살표 고정 */
-        if (mouseDown && !mouseDownPrev && distToPivot <= leverPivotGrabR) {
+        BOOL inElevationGrabZone = (dx >= -EL_GRAB_HALF_W && dx <= EL_GRAB_HALF_W &&
+                                     dy >= -EL_GRAB_HALF_H && dy <= EL_GRAB_HALF_H);
+        if (mouseDown && !mouseDownPrev && inElevationGrabZone) {
             draggingLever = TRUE;
             lastDragMouseY = mouseY;
             elVelocity = 0.0f;
@@ -504,7 +508,7 @@ static void UpdateGameplay(float dt) {
         }
 
         /* 우클릭: 화살표보다 위 클릭하면 증가, 아래 클릭하면 감소 -- 관성도 멈춤 */
-        if (rMouseDown && !rMouseDownPrev && distToPivot <= leverPivotGrabR) {
+        if (rMouseDown && !rMouseDownPrev && inElevationGrabZone) {
             elVelocity = 0.0f;
             elCurrentMil += (dy < 0) ? EL_FINE_STEP_MIL : -EL_FINE_STEP_MIL;
             if (elCurrentMil < EL_ADJUST_MIN) elCurrentMil = EL_ADJUST_MIN;
@@ -593,9 +597,12 @@ static void RenderGameplay(void) {
             }
             DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
         } else {
+            /* 드래그 판정 영역(더 넓게)을 먼저 옅게 표시하고, 그 안에 릴 눈금창을 그림 */
+            DrawRectOutline(leverCx - EL_GRAB_HALF_W, leverCy - EL_GRAB_HALF_H,
+                             EL_GRAB_HALF_W * 2, EL_GRAB_HALF_H * 2, 0xFF262A22);
             int reelX = leverCx, reelTop = leverCy - 130, reelH = 260;
             DrawRectOutline(reelX - 30, reelTop, 60, reelH, 0xFF333333);
-            for (int step = -6; step <= 6; step++) {
+            for (int step = -8; step <= 8; step++) {
                 int tickMil = ((int)(elCurrentMil) / EL_TICK_STEP + step) * EL_TICK_STEP;
                 if (tickMil < 0 || tickMil > (int)EL_ADJUST_MAX) continue;
                 float screenY = (float)leverCy - ((float)tickMil - elCurrentMil) * EL_PX_PER_MIL;
@@ -603,7 +610,6 @@ static void RenderGameplay(void) {
                 DrawNumber(reelX - 24, (int)screenY - 8, tickMil, 4, 0xFF8FB0D0);
             }
             DrawArrowRight(reelX - 34, leverCy, 10, (draggingLever || leverFlash > 0.0f) ? 0xFFFFB020 : 0xFFEEEEEE);
-            DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
         }
 
         /* 하단 단축키 안내 -- 두 스테이지 공통, 계속 유지 */
