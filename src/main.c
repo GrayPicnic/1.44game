@@ -28,6 +28,7 @@ static HWND g_hwnd;
 
 static int mouseX, mouseY;
 static BOOL mouseDown, mouseDownPrev;
+static BOOL rMouseDown, rMouseDownPrev;
 
 static Scene scene = SCENE_LOBBY;
 static Scene sceneBeforeOptions = SCENE_LOBBY;
@@ -38,14 +39,21 @@ static const char *LANG_NAMES[3] = { "EN", "KR", "JP" };
 
 static float introTimer = 0.0f;
 
-#define BUBBLE_DIGIT_TIME 1.0f
-#define BUBBLE_PAUSE_TIME 1.2f
+#define BUBBLE_DIGIT_TIME 0.7f
+#define BUBBLE_GAP_TIME 0.25f
+#define BUBBLE_PAUSE_TIME 1.0f
 #define LEVER_STEP 2.0f
 #define LEVER_FLASH_TIME 0.15f
 
+/* phase 0,2,4 = 자릿수 0,1,2 표시 / phase 1,3 = 자릿수 사이 짧은 공백 / phase 5 = 한 바퀴 끝나고 긴 침묵 */
+static const float BUBBLE_PHASE_DUR[6] = {
+    BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME, BUBBLE_DIGIT_TIME,
+    BUBBLE_GAP_TIME, BUBBLE_DIGIT_TIME, BUBBLE_PAUSE_TIME
+};
+
 static float gpElapsed = 0.0f;
 static int targetNumber = 0;      /* FDC가 불러주는 3자리 목표값, 예: 325 */
-static int bubblePhase = 0;       /* 0,1,2 = 해당 자릿수 표시, 3 = 침묵(딜레이) */
+static int bubblePhase = 0;       /* 0..5, 짝수=표시 홀수=공백. BUBBLE_PHASE_DUR 참고 */
 static float bubbleTimer = 0.0f;
 static float leverAngle = 90.0f;
 static float leverFlash = 0.0f;
@@ -266,20 +274,20 @@ static void UpdateGameplay(float dt) {
 
     gpElapsed += dt;
 
-    /* 말풍선: 목표값을 자릿수 단위로 하나씩 불러줌 (예: 3 -> 2 -> 5 -> 침묵 -> 반복) */
+    /* 말풍선: 목표값을 자릿수 단위로 하나씩 불러줌. 자릿수 사이/한바퀴 끝에는
+       배경(핑크 박스)까지 통째로 잠깐 사라짐 (bubblePhase 홀수 = 공백) */
     bubbleTimer += dt;
-    float phaseTime = (bubblePhase < 3) ? BUBBLE_DIGIT_TIME : BUBBLE_PAUSE_TIME;
-    if (bubbleTimer >= phaseTime) {
+    if (bubbleTimer >= BUBBLE_PHASE_DUR[bubblePhase]) {
         bubbleTimer = 0.0f;
-        bubblePhase = (bubblePhase + 1) % 4;
+        bubblePhase = (bubblePhase + 1) % 6;
     }
 
     if (leverFlash > 0.0f) leverFlash -= dt;
 
-    /* 레버 클릭식 미세조정: 축 왼쪽 클릭하면 감소, 오른쪽 클릭하면 증가 */
+    /* 레버 우클릭식 미세조정: 축 왼쪽 클릭하면 감소, 오른쪽 클릭하면 증가 */
     int dx = mouseX - leverCx, dy = mouseY - leverCy;
     float distToPivot = sqrtf((float)(dx * dx + dy * dy));
-    if (mouseDown && !mouseDownPrev && distToPivot <= leverPivotGrabR) {
+    if (rMouseDown && !rMouseDownPrev && distToPivot <= leverPivotGrabR) {
         leverAngle += (mouseX < leverCx) ? -LEVER_STEP : LEVER_STEP;
         if (leverAngle > 180.0f) leverAngle -= 360.0f;
         if (leverAngle < -180.0f) leverAngle += 360.0f;
@@ -291,11 +299,11 @@ static void RenderGameplay(void) {
     ClearScreen(0xFF161B12); /* bg placeholder */
 
     /* 좌측 숫자 말풍선 -- 목표값을 자릿수 단위로 하나씩 불러줌 (침묵 구간엔 빈 채로) */
-    FillPixelRect(30, 130, 110, 100, 0xFF6A2540);
-    DrawRectOutline(30, 130, 110, 100, 0xFFEEEEEE);
-    if (bubblePhase < 3) {
+    if (bubblePhase % 2 == 0) {
+        FillPixelRect(30, 130, 110, 100, 0xFF6A2540);
+        DrawRectOutline(30, 130, 110, 100, 0xFFEEEEEE);
         int digits[3] = { targetNumber / 100, (targetNumber / 10) % 10, targetNumber % 10 };
-        DrawNumber(30 + 40, 130 + 40, digits[bubblePhase], 1, 0xFFFFFFFF);
+        DrawNumber(30 + 40, 130 + 40, digits[bubblePhase / 2], 1, 0xFFFFFFFF);
     }
 
     /* 상단 타이머 게이지 */
@@ -331,7 +339,7 @@ static void RenderGameplay(void) {
     DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
 
     /* 하단 단축키 안내 */
-    DrawLabel(20, GAME_H - 20, "CLICK LEVER: FINE-ADJUST", 0xFFAAAAAA, 1);
+    DrawLabel(20, GAME_H - 20, "RIGHT-CLICK LEVER: FINE-ADJUST", 0xFFAAAAAA, 1);
     DrawLabel(200, GAME_H - 20, "SPACE: CONFIRM", 0xFFAAAAAA, 1);
     int escW = TextWidth("ESC: QUIT", 1);
     DrawLabel(GAME_W - 20 - escW, GAME_H - 20, "ESC: QUIT", 0xFFAAAAAA, 1);
@@ -380,6 +388,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             mouseDown = FALSE;
             ReleaseCapture();
             return 0;
+        case WM_RBUTTONDOWN:
+            rMouseDown = TRUE;
+            return 0;
+        case WM_RBUTTONUP:
+            rMouseDown = FALSE;
+            return 0;
         default: return DefWindowProc(hwnd, msg, wp, lp);
     }
 }
@@ -424,6 +438,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
            양쪽 어디서 엣지(방금 눌림)를 체크하든 동일한 기준을 보게 하기 위함 */
         for (int i = 0; i < 256; i++) keysPrev[i] = keys[i];
         mouseDownPrev = mouseDown;
+        rMouseDownPrev = rMouseDown;
 
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) running = FALSE;
