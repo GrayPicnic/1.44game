@@ -16,7 +16,8 @@
 #define WINDOW_SCALE 2
 #define WINDOW_TITLE "1.44MB Game - Scaffold"
 #define PI_F 3.14159265f
-#define GAMEPLAY_TIME_LIMIT 30.0f
+#define GAMEPLAY_TIME_LIMIT 60.0f
+#define MISSION_FAILED_HOLD_TIME 3.0f
 
 typedef enum { SCENE_LOBBY, SCENE_OPTIONS, SCENE_INTRO, SCENE_GAMEPLAY } Scene;
 
@@ -58,6 +59,8 @@ static float bubbleTimer = 0.0f;
 static float leverAngle = 90.0f;
 static float leverFlash = 0.0f;
 static BOOL draggingLever = FALSE;
+static BOOL missionFailed = FALSE;
+static float failTimer = 0.0f;
 static int leverCx = 560, leverCy = 190;
 static const int leverPivotGrabR = 70;
 
@@ -260,6 +263,8 @@ static void EnterGameplay(void) {
     bubblePhase = 0;
     bubbleTimer = 0.0f;
     targetNumber = rand() % 360; /* 예: 325 -- FDC가 불러주는 3자리 목표값 */
+    missionFailed = FALSE;
+    failTimer = 0.0f;
 }
 
 static void UpdateIntro(float dt) {
@@ -271,9 +276,21 @@ static void UpdateIntro(float dt) {
 /* ---------- 씬: 조작화면 ---------- */
 
 static void UpdateGameplay(float dt) {
+    if (missionFailed) {
+        /* 조작 불가 -- 검정화면 홀드 후 로비로 */
+        failTimer += dt;
+        if (failTimer >= MISSION_FAILED_HOLD_TIME) scene = SCENE_LOBBY;
+        return;
+    }
+
     if (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE]) { scene = SCENE_LOBBY; return; }
 
     gpElapsed += dt;
+    if (gpElapsed >= GAMEPLAY_TIME_LIMIT) {
+        missionFailed = TRUE;
+        failTimer = 0.0f;
+        return;
+    }
 
     /* 말풍선: 목표값을 자릿수 단위로 하나씩 불러줌. 자릿수 사이/한바퀴 끝에는
        배경(핑크 박스)까지 통째로 잠깐 사라짐 (bubblePhase 홀수 = 공백) */
@@ -308,7 +325,7 @@ static void UpdateGameplay(float dt) {
         float diff = clickAngle - leverAngle;
         while (diff > 180.0f) diff -= 360.0f;
         while (diff < -180.0f) diff += 360.0f;
-        leverAngle += (diff < 0.0f) ? -LEVER_STEP : LEVER_STEP;
+        leverAngle += (diff < 0.0f) ? LEVER_STEP : -LEVER_STEP; /* 시계방향 클릭=감소, 반시계=증가 */
         if (leverAngle > 180.0f) leverAngle -= 360.0f;
         if (leverAngle < -180.0f) leverAngle += 360.0f;
         leverFlash = LEVER_FLASH_TIME;
@@ -316,6 +333,14 @@ static void UpdateGameplay(float dt) {
 }
 
 static void RenderGameplay(void) {
+    if (missionFailed) {
+        ClearScreen(0xFF000000);
+        const char *msg = "SQUAD WIPED";
+        int tw = TextWidth(msg, 4);
+        DrawLabel(GAME_W / 2 - tw / 2, GAME_H / 2 - 14, msg, 0xFFFF3030, 4);
+        return;
+    }
+
     ClearScreen(0xFF161B12); /* bg placeholder */
 
     /* 좌측 숫자 말풍선 -- 목표값을 자릿수 단위로 하나씩 불러줌 (침묵 구간엔 빈 채로) */
