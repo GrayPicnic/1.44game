@@ -457,11 +457,19 @@ static void PlayStaticNoise(void) {
 #define MUSIC_STEPS 16
 #define MUSIC_TOTAL_SAMPLES (MUSIC_STEP_SAMPLES * MUSIC_STEPS)
 
-/* 낮은 음역대 위주의 긴장감 있는 행진곡풍 베이스라인 (A단조). 0은 쉼표. */
-static const float MUSIC_NOTES[MUSIC_STEPS] = {
-    55.00f, 0.0f, 55.00f, 0.0f, 65.41f, 0.0f, 55.00f, 0.0f,
-    87.31f, 0.0f, 82.41f, 0.0f, 55.00f, 0.0f, 98.00f, 0.0f
+/* 전장/행군 느낌: 저음 베이스(오스티나토) + 쿵(킥) + 탁(스네어풍 노이즈) 3레이어를
+   섞어서 하나의 PCM 버퍼에 합성한다. 0은 쉼표/없음. */
+static const float MUSIC_BASS_NOTES[MUSIC_STEPS] = {
+    55.00f, 0.0f, 0.0f, 0.0f,  82.41f, 0.0f, 0.0f, 0.0f,
+    87.31f, 0.0f, 0.0f, 0.0f,  65.41f, 0.0f, 55.00f, 0.0f
 };
+/* 4분음표마다(스텝 0,4,8,12) 쿵 -- 규칙적인 행군 박자 */
+static const int MUSIC_KICK[MUSIC_STEPS]  = { 1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0 };
+/* 그 사이 뒷박(스텝 2,6,10,14)에 탁 -- 고전적인 "쿵-탁-쿵-탁" 행진 리듬 */
+static const int MUSIC_SNARE[MUSIC_STEPS] = { 0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,0 };
+
+#define MUSIC_KICK_SAMPLES (MUSIC_SAMPLE_RATE / 12)   /* ~83ms */
+#define MUSIC_SNARE_SAMPLES (MUSIC_SAMPLE_RATE / 10)  /* ~100ms */
 
 static HWAVEOUT g_waveOutMusic = NULL;
 static WAVEHDR g_musicHdr;
@@ -470,24 +478,44 @@ static BOOL g_musicOutOpen = FALSE;
 static BOOL g_musicPlaying = FALSE;
 
 static void GenerateMusicLoop(void) {
-    for (int step = 0; step < MUSIC_STEPS; step++) {
-        float freq = MUSIC_NOTES[step];
-        int base = step * MUSIC_STEP_SAMPLES;
-        for (int i = 0; i < MUSIC_STEP_SAMPLES; i++) {
-            unsigned char v = 128;
-            if (freq > 0.0f) {
-                /* 퉁기는 느낌의 감쇠 엔벨로프(펄럭 소리 방지용 페이드인 포함) + 사각파 */
-                float t = (float)i / (float)MUSIC_STEP_SAMPLES;
-                float envelope = expf(-t * 5.0f);
-                int fadeIn = 40;
-                if (i < fadeIn) envelope *= (float)i / (float)fadeIn;
-                float phase = fmodf(freq * (float)i / (float)MUSIC_SAMPLE_RATE, 1.0f);
-                float square = (phase < 0.5f) ? 1.0f : -1.0f;
-                float amp = 22.0f; /* 배경음이라 효과음(지직 잡음)보다 훨씬 조용하게 */
-                v = (unsigned char)(128 + (int)(square * envelope * amp));
-            }
-            g_musicBuf[base + i] = v;
+    for (int i = 0; i < MUSIC_TOTAL_SAMPLES; i++) {
+        int step = i / MUSIC_STEP_SAMPLES;
+        int posInStep = i % MUSIC_STEP_SAMPLES;
+        float mix = 0.0f;
+
+        /* 베이스 -- 퉁기는 사각파 오스티나토 */
+        float bassFreq = MUSIC_BASS_NOTES[step];
+        if (bassFreq > 0.0f) {
+            float t = (float)posInStep / (float)MUSIC_STEP_SAMPLES;
+            float envelope = expf(-t * 5.0f);
+            int fadeIn = 40;
+            if (posInStep < fadeIn) envelope *= (float)posInStep / (float)fadeIn;
+            float phase = fmodf(bassFreq * (float)i / (float)MUSIC_SAMPLE_RATE, 1.0f);
+            float square = (phase < 0.5f) ? 1.0f : -1.0f;
+            mix += square * envelope * 20.0f;
         }
+
+        /* 킥(쿵) -- 피치가 빠르게 떨어지는 사인 버스트, 대포 같은 둔중한 타격감 */
+        if (MUSIC_KICK[step] && posInStep < MUSIC_KICK_SAMPLES) {
+            float kt = (float)posInStep / (float)MUSIC_KICK_SAMPLES;
+            float kickFreq = 90.0f - kt * 50.0f;
+            float kenv = expf(-kt * 8.0f);
+            float ksin = sinf(2.0f * PI_F * kickFreq * (float)posInStep / (float)MUSIC_SAMPLE_RATE);
+            mix += ksin * kenv * 55.0f;
+        }
+
+        /* 스네어(탁) -- 짧게 끊어지는 노이즈 버스트 */
+        if (MUSIC_SNARE[step] && posInStep < MUSIC_SNARE_SAMPLES) {
+            float st = (float)posInStep / (float)MUSIC_SNARE_SAMPLES;
+            float senv = expf(-st * 10.0f);
+            int n = (rand() % 256) - 128;
+            mix += (float)n * senv * 0.35f;
+        }
+
+        int v = 128 + (int)mix;
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        g_musicBuf[i] = (unsigned char)v;
     }
 }
 
