@@ -446,6 +446,88 @@ static void PlayStaticNoise(void) {
     waveOutWrite(g_waveOut, &g_waveHdr, sizeof(WAVEHDR));
 }
 
+/* ---------- BGM: 칩튠 베이스라인도 코드로 직접 합성 (오디오 파일 0개 원칙 유지) ----------
+   waveOut 핸들을 SFX(g_waveOut)와 별도로 하나 더 열어서(g_waveOutMusic) 지직 잡음이랑
+   동시에 재생돼도 서로 안 끊기게 한다. 루프는 한 번에 다 렌더링해둔 버퍼를
+   WHDR_DONE 될 때마다 다시 큐에 넣는 방식(수동 반복) -- 매 프레임 폴링. */
+
+#define MUSIC_SAMPLE_RATE 8000
+#define MUSIC_BPM 100  /* 정수 연산으로만 계산해야 배열 크기로 쓸 때 컴파일 타임 상수로 확실히 접힘 */
+#define MUSIC_STEP_SAMPLES (MUSIC_SAMPLE_RATE * 60 / MUSIC_BPM / 2) /* 8분음표 */
+#define MUSIC_STEPS 16
+#define MUSIC_TOTAL_SAMPLES (MUSIC_STEP_SAMPLES * MUSIC_STEPS)
+
+/* 낮은 음역대 위주의 긴장감 있는 행진곡풍 베이스라인 (A단조). 0은 쉼표. */
+static const float MUSIC_NOTES[MUSIC_STEPS] = {
+    55.00f, 0.0f, 55.00f, 0.0f, 65.41f, 0.0f, 55.00f, 0.0f,
+    87.31f, 0.0f, 82.41f, 0.0f, 55.00f, 0.0f, 98.00f, 0.0f
+};
+
+static HWAVEOUT g_waveOutMusic = NULL;
+static WAVEHDR g_musicHdr;
+static unsigned char g_musicBuf[MUSIC_TOTAL_SAMPLES];
+static BOOL g_musicOutOpen = FALSE;
+static BOOL g_musicPlaying = FALSE;
+
+static void GenerateMusicLoop(void) {
+    for (int step = 0; step < MUSIC_STEPS; step++) {
+        float freq = MUSIC_NOTES[step];
+        int base = step * MUSIC_STEP_SAMPLES;
+        for (int i = 0; i < MUSIC_STEP_SAMPLES; i++) {
+            unsigned char v = 128;
+            if (freq > 0.0f) {
+                /* 퉁기는 느낌의 감쇠 엔벨로프(펄럭 소리 방지용 페이드인 포함) + 사각파 */
+                float t = (float)i / (float)MUSIC_STEP_SAMPLES;
+                float envelope = expf(-t * 5.0f);
+                int fadeIn = 40;
+                if (i < fadeIn) envelope *= (float)i / (float)fadeIn;
+                float phase = fmodf(freq * (float)i / (float)MUSIC_SAMPLE_RATE, 1.0f);
+                float square = (phase < 0.5f) ? 1.0f : -1.0f;
+                float amp = 22.0f; /* 배경음이라 효과음(지직 잡음)보다 훨씬 조용하게 */
+                v = (unsigned char)(128 + (int)(square * envelope * amp));
+            }
+            g_musicBuf[base + i] = v;
+        }
+    }
+}
+
+static void InitMusic(void) {
+    WAVEFORMATEX wfx;
+    ZeroMemory(&wfx, sizeof(wfx));
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = 1;
+    wfx.nSamplesPerSec = MUSIC_SAMPLE_RATE;
+    wfx.wBitsPerSample = 8;
+    wfx.nBlockAlign = 1;
+    wfx.nAvgBytesPerSec = MUSIC_SAMPLE_RATE;
+    if (waveOutOpen(&g_waveOutMusic, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR) {
+        g_musicOutOpen = TRUE;
+        GenerateMusicLoop();
+    }
+}
+
+/* 매 프레임 호출 -- 재생 중인 버퍼가 끝났으면(WHDR_DONE) 곧바로 같은 버퍼를 다시 큐에 넣어
+   무한 반복시킨다. soundOn이 꺼지면 즉시 waveOutReset으로 멈춤. */
+static void UpdateMusicLoop(void) {
+    if (!g_musicOutOpen) return;
+    if (!soundOn) {
+        if (g_musicPlaying) {
+            waveOutReset(g_waveOutMusic);
+            g_musicPlaying = FALSE;
+        }
+        return;
+    }
+    if (!g_musicPlaying || (g_musicHdr.dwFlags & WHDR_DONE)) {
+        if (g_musicHdr.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(g_waveOutMusic, &g_musicHdr, sizeof(WAVEHDR));
+        ZeroMemory(&g_musicHdr, sizeof(WAVEHDR));
+        g_musicHdr.lpData = (LPSTR)g_musicBuf;
+        g_musicHdr.dwBufferLength = MUSIC_TOTAL_SAMPLES;
+        waveOutPrepareHeader(g_waveOutMusic, &g_musicHdr, sizeof(WAVEHDR));
+        waveOutWrite(g_waveOutMusic, &g_musicHdr, sizeof(WAVEHDR));
+        g_musicPlaying = TRUE;
+    }
+}
+
 /* ---------- 버튼 ---------- */
 
 typedef struct { int x, y, w, h; uint32_t color; const wchar_t *label; } Button;
@@ -1168,6 +1250,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
        실행파일 크기엔 영향 없음(가져오는 함수 몇 개 추가되는 수준). */
     timeBeginPeriod(1);
     InitAudio();
+    InitMusic();
 
     char lobbyBgPath[MAX_PATH];
     GetAssetPath(lobbyBgPath, MAX_PATH, "images\\Lobby.bmp");
@@ -1243,6 +1326,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
 
         UpdateGame(dt);
         RenderGame();
+        UpdateMusicLoop();
 
         RECT client;
         GetClientRect(hwnd, &client);
@@ -1256,6 +1340,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     DeleteObject(g_fontMedium);
     DeleteObject(g_fontLarge);
     if (g_waveOutOpen) waveOutClose(g_waveOut);
+    if (g_musicOutOpen) { waveOutReset(g_waveOutMusic); waveOutClose(g_waveOutMusic); }
     SelectObject(g_hdc, g_memBitmapOld);
     DeleteObject(g_memBitmap);
     DeleteDC(g_hdc);
