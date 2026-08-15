@@ -209,8 +209,11 @@ static void DrawArrowRight(int tipX, int tipY, int size, uint32_t color) {
 
 /* ---------- 한글 텍스트 (프레임버퍼 위에 GDI로 후처리 렌더링) ----------
    프레임버퍼는 순수 픽셀 배열이라 여기 직접 한글을 그릴 방법이 없다. 대신 이번 프레임에
-   그릴 텍스트를 큐에 모아뒀다가, WinMain 루프에서 StretchDIBits로 프레임버퍼를 화면에 낸
-   "바로 다음"에 같은 HDC 위에 TextOutW/DrawTextW로 시스템 폰트(맑은 고딕)를 덧그린다. */
+   그릴 텍스트를 큐에 모아뒀다가, StretchDIBits로 프레임버퍼를 그린 "바로 다음"에 같은
+   DC 위에 TextOutW/DrawTextW로 시스템 폰트(맑은 고딕)를 덧그린다.
+   단, 이 두 단계를 화면 DC에 직접 하면 그 사이 순간이 화면에 노출되어 텍스트가
+   깜빡여 보인다 -- 그래서 오프스크린 메모리 DC(g_hdc)에 두 단계를 다 그린 뒤
+   마지막에 BitBlt로 화면에 한 번에 옮긴다 (더블 버퍼링). */
 
 static wchar_t g_korBuf[4][128];
 static int g_korBufIdx = 0;
@@ -233,7 +236,9 @@ static int textQueueCount = 0;
 static BOOL cursorHot = FALSE;   /* 지금 마우스 아래가 클릭/드래그 가능한 지점인지 (커서 색 결정용) */
 static BOOL inputBlocked = FALSE; /* 옵션 팝업이 떠 있을 때 뒤쪽 화면 입력 차단용 */
 
-static HDC g_hdc;
+static HDC g_hdc;         /* 오프스크린 메모리 DC -- 프레임버퍼+텍스트를 여기 다 그린 뒤 화면에 한 번에 BitBlt */
+static HDC g_screenDC;    /* 실제 화면(창) DC -- BitBlt 대상 */
+static HBITMAP g_memBitmap, g_memBitmapOld;
 static HFONT g_fontSmall, g_fontMedium, g_fontLarge;
 
 static void QueueTextPoint(int x, int y, int fontIdx, uint32_t color, const wchar_t *text) {
@@ -305,7 +310,7 @@ static void PlayStaticNoise(void) {
         int n = rand() % 256;
         if ((rand() % 100) < 15) n = (rand() % 2) ? 255 : 0;
         float envelope = 1.0f - (float)i / (float)STATIC_SND_SAMPLES * 0.3f;
-        int centered = (int)(((float)n - 128.0f) * envelope) + 128;
+        int centered = (int)(((float)n - 128.0f) * envelope * 0.5f) + 128;  /* *0.5f = 볼륨 50%로 축소 */
         if (centered < 0) centered = 0;
         if (centered > 255) centered = 255;
         g_staticBuf[i] = (unsigned char)centered;
@@ -923,7 +928,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     bmi.bmiHeader.biCompression = BI_RGB;
 
     HDC hdc = GetDC(hwnd);
-    g_hdc = hdc;
+    g_screenDC = hdc;
+
+    /* 오프스크린 메모리 DC -- 프레임버퍼 blit과 텍스트 그리기를 전부 여기서 한 뒤,
+       화면에는 완성된 그림을 BitBlt로 한 번에만 낸다 (안 그러면 그 사이 순간이
+       노출되어 텍스트가 깜빡여 보임). */
+    RECT initClient;
+    GetClientRect(hwnd, &initClient);
+    g_hdc = CreateCompatibleDC(hdc);
+    g_memBitmap = CreateCompatibleBitmap(hdc, initClient.right, initClient.bottom);
+    g_memBitmapOld = (HBITMAP)SelectObject(g_hdc, g_memBitmap);
     SetBkMode(g_hdc, TRANSPARENT);
     g_fontSmall  = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         HANGUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
@@ -962,16 +976,20 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
 
         RECT client;
         GetClientRect(hwnd, &client);
-        StretchDIBits(hdc, 0, 0, client.right, client.bottom,
+        StretchDIBits(g_hdc, 0, 0, client.right, client.bottom,
             0, 0, GAME_W, GAME_H, framebuffer, &bmi, DIB_RGB_COLORS, SRCCOPY);
         FlushTextQueue();
+        BitBlt(g_screenDC, 0, 0, client.right, client.bottom, g_hdc, 0, 0, SRCCOPY);
         Sleep(1);
     }
     DeleteObject(g_fontSmall);
     DeleteObject(g_fontMedium);
     DeleteObject(g_fontLarge);
     if (g_waveOutOpen) waveOutClose(g_waveOut);
-    ReleaseDC(hwnd, hdc);
+    SelectObject(g_hdc, g_memBitmapOld);
+    DeleteObject(g_memBitmap);
+    DeleteDC(g_hdc);
+    ReleaseDC(hwnd, g_screenDC);
     timeEndPeriod(1);
     return 0;
 }
