@@ -99,7 +99,22 @@ static const float BUBBLE_PHASE_DUR[8] = {
 #define FIRE_SQUARE_Y 155
 #define FIRE_SQUARE_SIZE 40
 
-typedef enum { FIRESTAGE_AZIMUTH, FIRESTAGE_ELEVATION, FIRESTAGE_FIRE } FireStage;
+/* ---------- 4단계: 장약 고르기 ---------- */
+/* 번호(1~5)가 적힌 원반 20개가 무더기로 쌓여있다. 드래그로 하나씩 치워가며(z 순서가
+   집을 때마다 맨 위로 올라감) 무전으로 지정된 번호를 찾아, 화살표가 위아래로 움직이는
+   통에 끌어다 넣으면 완료. 엉뚱한 번호를 넣어도 페널티는 없음 -- 순수 탐색 퍼즐. */
+#define CHARGE_COUNT 20
+#define CHARGE_RADIUS 17
+#define CHARGE_PILE_CX 420
+#define CHARGE_PILE_CY 195
+#define CHARGE_PILE_SPREAD_X 150
+#define CHARGE_PILE_SPREAD_Y 90
+#define CHARGE_BIN_X 560
+#define CHARGE_BIN_Y 110
+#define CHARGE_BIN_W 60
+#define CHARGE_BIN_H 170
+
+typedef enum { FIRESTAGE_AZIMUTH, FIRESTAGE_ELEVATION, FIRESTAGE_FIRE, FIRESTAGE_CHARGE } FireStage;
 typedef enum { TRANS_NONE, TRANS_OUT, TRANS_IN } TransState;
 typedef enum { RESULT_NONE, RESULT_HIT, RESULT_MISS, RESULT_FIRE_FAIL } FinalResult;
 
@@ -142,6 +157,14 @@ static float fireBulletSpeed = FIRE_BULLET_SPEED_BASE;
 static float fireMarkPos = 0.5f;     /* 0..1, 붉은 표시 위치 */
 static BOOL fireStageFailed = FALSE;
 static float fireSquareX = (float)FIRE_SQUARE_START_X;
+
+/* 4단계 상태 */
+static int chargeNumber[CHARGE_COUNT];   /* 각 원반에 적힌 번호(1~5) */
+static float chargeX[CHARGE_COUNT], chargeY[CHARGE_COUNT];
+static int chargeZ[CHARGE_COUNT];        /* 쌓인 순서 -- 클수록 위, 집으면 맨 위로 갱신 */
+static int chargeNextZ = 0;
+static int chargeTargetNumber = 1;       /* 이번 라운드에 찾아야 하는 번호 */
+static int chargeDragIdx = -1;           /* 지금 드래그 중인 원반 인덱스, 없으면 -1 */
 
 static int leverCx = 560, leverCy = 190;
 static const int leverPivotGrabR = 70;
@@ -210,6 +233,12 @@ static void DrawArrowDown(int tipX, int tipY, int size, uint32_t color) {
     for (int i = 0; i < size; i++) {
         int rowW = (size - i) * 2;
         FillPixelRect(tipX - rowW / 2, tipY - size + i, rowW, 1, color);
+    }
+}
+static void FillCircle(int cx, int cy, int radius, uint32_t color) {
+    for (int y = -radius; y <= radius; y++) {
+        int rowW = (int)sqrtf((float)(radius * radius - y * y));
+        FillPixelRect(cx - rowW, cy + y, rowW * 2 + 1, 1, color);
     }
 }
 
@@ -451,7 +480,24 @@ static void EnterGameplay(void) {
     fireStageFailed = FALSE;
     fireSquareX = (float)FIRE_SQUARE_START_X;
 
+    chargeDragIdx = -1;
+
     draggingLever = FALSE;
+}
+
+/* 3단계(사격) 통과 후 4단계 진입 시 무더기를 새로 쌓는다. 목표 번호는 항상
+   최소 한 번은 무더기 안에 존재하도록 인덱스 0에 강제로 심어둔다(운 나쁘면
+   20개 다 다른 번호라 목표가 아예 안 나올 수 있어서 -- 확률은 낮지만 방지). */
+static void EnterChargeStage(void) {
+    chargeTargetNumber = 1 + rand() % 5;
+    for (int i = 0; i < CHARGE_COUNT; i++) {
+        chargeNumber[i] = (i == 0) ? chargeTargetNumber : (1 + rand() % 5);
+        chargeX[i] = (float)(CHARGE_PILE_CX - CHARGE_PILE_SPREAD_X + rand() % (2 * CHARGE_PILE_SPREAD_X + 1));
+        chargeY[i] = (float)(CHARGE_PILE_CY - CHARGE_PILE_SPREAD_Y + rand() % (2 * CHARGE_PILE_SPREAD_Y + 1));
+        chargeZ[i] = i;
+    }
+    chargeNextZ = CHARGE_COUNT;
+    chargeDragIdx = -1;
 }
 
 static void UpdateIntro(float dt) {
@@ -535,13 +581,26 @@ static void UpdateGameplay(float dt) {
                 fireSquareX = (float)FIRE_SQUARE_START_X;
                 transState = TRANS_IN;
                 transTimer = 0.0f;
-            } else {
+            } else if (fireStage == FIRESTAGE_FIRE) {
                 if (fireStageFailed) {
+                    /* 타이밍 실패는 여기서 바로 게임오버 -- 4단계로 넘어가지 않음 */
                     finalResult = RESULT_FIRE_FAIL;
                 } else {
-                    float totalError = azErrorRecorded + elErrorRecorded;
-                    finalResult = (totalError <= TOTAL_ERROR_SUCCESS_MAX) ? RESULT_HIT : RESULT_MISS;
+                    fireStage = FIRESTAGE_CHARGE;
+                    EnterChargeStage();
+                    bubblePhase = 0;
+                    bubbleTimer = 0.0f;
+                    bubbleIntroActive = TRUE;
+                    bubbleIntroPhase = 0;
+                    bubbleIntroTimer = 0.0f;
+                    PlayStaticNoise();
                 }
+                transState = TRANS_IN;
+                transTimer = 0.0f;
+            } else {
+                /* FIRESTAGE_CHARGE 완료 -- 여기 도달했다는 건 항상 올바른 장약을 제출했다는 뜻 */
+                float totalError = azErrorRecorded + elErrorRecorded;
+                finalResult = (totalError <= TOTAL_ERROR_SUCCESS_MAX) ? RESULT_HIT : RESULT_MISS;
                 transState = TRANS_IN;
                 transTimer = 0.0f;
             }
@@ -581,6 +640,46 @@ static void UpdateGameplay(float dt) {
                 fireStageFailed = TRUE;
                 transState = TRANS_OUT;
                 transTimer = 0.0f;
+            }
+        }
+        return;
+    }
+
+    if (fireStage == FIRESTAGE_CHARGE) {
+        /* 4단계: 무더기에서 목표 번호 원반을 찾아 드래그로 통에 넣기 */
+        BOOL anyHover = FALSE;
+        for (int i = 0; i < CHARGE_COUNT; i++) {
+            float hdx = (float)mouseX - chargeX[i], hdy = (float)mouseY - chargeY[i];
+            if (hdx * hdx + hdy * hdy <= (float)(CHARGE_RADIUS * CHARGE_RADIUS)) { anyHover = TRUE; break; }
+        }
+        if (anyHover || chargeDragIdx >= 0) cursorHot = TRUE;
+
+        if (mouseDown && !mouseDownPrev && chargeDragIdx < 0) {
+            /* 겹쳐 쌓여있으니 z가 가장 큰(맨 위) 원반부터 집는다 */
+            int best = -1, bestZ = -1;
+            for (int i = 0; i < CHARGE_COUNT; i++) {
+                float hdx = (float)mouseX - chargeX[i], hdy = (float)mouseY - chargeY[i];
+                if (hdx * hdx + hdy * hdy <= (float)(CHARGE_RADIUS * CHARGE_RADIUS) && chargeZ[i] > bestZ) {
+                    best = i; bestZ = chargeZ[i];
+                }
+            }
+            if (best >= 0) {
+                chargeDragIdx = best;
+                chargeZ[best] = chargeNextZ++; /* 집으면 맨 위로 올라옴 */
+            }
+        }
+        if (chargeDragIdx >= 0) {
+            if (mouseDown) {
+                chargeX[chargeDragIdx] = (float)mouseX;
+                chargeY[chargeDragIdx] = (float)mouseY;
+            } else {
+                BOOL overBin = (mouseX >= CHARGE_BIN_X && mouseX <= CHARGE_BIN_X + CHARGE_BIN_W &&
+                                 mouseY >= CHARGE_BIN_Y && mouseY <= CHARGE_BIN_Y + CHARGE_BIN_H);
+                if (overBin && chargeNumber[chargeDragIdx] == chargeTargetNumber) {
+                    transState = TRANS_OUT;
+                    transTimer = 0.0f;
+                }
+                chargeDragIdx = -1;
             }
         }
         return;
@@ -700,9 +799,8 @@ static void RenderGameplay(void) {
     } else {
         ClearScreen(0xFF161B12); /* bg placeholder */
 
-        /* 좌측 숫자 말풍선 -- 방위각/사각 스테이지에서만. 3단계(사격)에는 없음 */
+        /* 좌측 숫자 말풍선 -- 방위각/사각/장약 스테이지에서만. 3단계(사격)에는 없음 */
         if (fireStage != FIRESTAGE_FIRE) {
-            int bubbleTarget = (fireStage == FIRESTAGE_AZIMUTH) ? azTargetMil : elTargetMil;
             if (bubbleIntroActive) {
                 BOOL flashOn = (bubbleIntroPhase % 2 == 0);
                 if (flashOn) {
@@ -712,11 +810,17 @@ static void RenderGameplay(void) {
             } else if (bubblePhase % 2 == 0) {
                 FillPixelRect(30, 130, 110, 100, 0xFF6A2540);
                 DrawRectOutline(30, 130, 110, 100, 0xFFEEEEEE);
-                int digits[4] = {
-                    (bubbleTarget / 1000) % 10, (bubbleTarget / 100) % 10,
-                    (bubbleTarget / 10) % 10, bubbleTarget % 10
-                };
-                DrawNumber(30 + 40, 130 + 40, digits[bubblePhase / 2], 1, 0xFFFFFFFF);
+                if (fireStage == FIRESTAGE_CHARGE) {
+                    /* 장약 번호는 한 자리라 계속 같은 자리에만 표시(4자리 순차 콜아웃 불필요) */
+                    DrawNumber(30 + 40, 130 + 40, chargeTargetNumber, 1, 0xFFFFFFFF);
+                } else {
+                    int bubbleTarget = (fireStage == FIRESTAGE_AZIMUTH) ? azTargetMil : elTargetMil;
+                    int digits[4] = {
+                        (bubbleTarget / 1000) % 10, (bubbleTarget / 100) % 10,
+                        (bubbleTarget / 10) % 10, bubbleTarget % 10
+                    };
+                    DrawNumber(30 + 40, 130 + 40, digits[bubblePhase / 2], 1, 0xFFFFFFFF);
+                }
             }
         }
 
@@ -733,8 +837,8 @@ static void RenderGameplay(void) {
         FillPixelRect(barX + 2, barY + 2, fillW, barH - 4, gaugeColor);
         DrawNumber(barX + barW + 12, barY - 2, (int)(timeLeft + 0.99f), 2, lowTime ? 0xFFFF4433 : 0xFF3CFF6E);
 
-        /* 중앙 숫자판 -- 3단계(사격)에는 숫자판 대신 그 자리에 초록 사각 오브젝트가 있음(아래) */
-        if (fireStage != FIRESTAGE_FIRE) {
+        /* 중앙 숫자판 -- 3단계(사격)/4단계(장약)에는 그 자리에 다른 오브젝트가 있어서 생략 */
+        if (fireStage == FIRESTAGE_AZIMUTH || fireStage == FIRESTAGE_ELEVATION) {
             FillPixelRect(230, 140, 160, 100, 0xFF1E2A4A);
             DrawRectOutline(230, 140, 160, 100, 0xFFEEEEEE);
         }
@@ -776,7 +880,7 @@ static void RenderGameplay(void) {
                 DrawNumber(reelX - 24, (int)screenY - 8, tickMil, 4, 0xFF8FB0D0);
             }
             DrawArrowRight(reelX - 34, leverCy, 10, (draggingLever || leverFlash > 0.0f) ? 0xFFFFB020 : 0xFFEEEEEE);
-        } else {
+        } else if (fireStage == FIRESTAGE_FIRE) {
             /* 3단계: 좌측 사각 오브젝트 + 우측 타이밍 게이지 (붉은 표시 위를 불릿이 왕복) */
             FillPixelRect((int)fireSquareX, FIRE_SQUARE_Y, FIRE_SQUARE_SIZE, FIRE_SQUARE_SIZE, 0xFF3CFF6E);
             DrawRectOutline((int)fireSquareX, FIRE_SQUARE_Y, FIRE_SQUARE_SIZE, FIRE_SQUARE_SIZE, 0xFFEEEEEE);
@@ -790,15 +894,33 @@ static void RenderGameplay(void) {
             int bulletX = FIRE_GAUGE_X + (int)(fireBulletPos * (float)FIRE_GAUGE_W);
             FillPixelRect(bulletX - 3, FIRE_GAUGE_Y - 8, 6, FIRE_GAUGE_H + 16,
                           (leverFlash > 0.0f) ? 0xFFFFB020 : 0xFFFFD020);
+        } else {
+            /* 4단계: 번호 원반 무더기(드래그로 치우며 탐색) + 통(제출함, 위아래로 화살표가 왔다갔다) */
+            DrawRectOutline(CHARGE_BIN_X, CHARGE_BIN_Y, CHARGE_BIN_W, CHARGE_BIN_H, 0xFFAAAAAA);
+            float binBounce = sinf(gpElapsed * 4.0f) * 10.0f;
+            DrawArrowDown(CHARGE_BIN_X + CHARGE_BIN_W / 2, CHARGE_BIN_Y - 6 + (int)binBounce, 7, 0xFFFFD020);
+
+            /* z 순서(작은 값부터)로 그려서 나중 그려지는(z가 큰) 원반이 위로 보이게 */
+            for (int z = 0; z < chargeNextZ; z++) {
+                for (int i = 0; i < CHARGE_COUNT; i++) {
+                    if (chargeZ[i] != z) continue;
+                    uint32_t col = (i == chargeDragIdx) ? 0xFFE0C060 : 0xFFC9A227;
+                    FillCircle((int)chargeX[i], (int)chargeY[i], CHARGE_RADIUS, col);
+                    DrawRing((int)chargeX[i], (int)chargeY[i], (float)CHARGE_RADIUS, 0xFF6B5615);
+                    DrawNumber((int)chargeX[i] - 4, (int)chargeY[i] - 9, chargeNumber[i], 1, 0xFF2A2200);
+                }
+            }
         }
 
         /* 하단 단축키 안내 */
-        if (fireStage != FIRESTAGE_FIRE) {
+        if (fireStage == FIRESTAGE_AZIMUTH || fireStage == FIRESTAGE_ELEVATION) {
             QueueTextPoint(20, GAME_H - 32, 0, 0xFFAAAAAA, Kor("드래그: 큰 폭 조정"));
             QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("우클릭: 미세 조정"));
             QueueTextPoint(200, GAME_H - 20, 0, 0xFFAAAAAA, Kor("스페이스: 확정"));
-        } else {
+        } else if (fireStage == FIRESTAGE_FIRE) {
             QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("표시와 겹칠 때 스페이스로 발사"));
+        } else {
+            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("드래그로 치우고 번호를 찾아 통에 넣으시오"));
         }
         QueueTextPoint(GAME_W - 130, GAME_H - 20, 0, 0xFFAAAAAA, Kor("ESC: 나가기"));
     }
