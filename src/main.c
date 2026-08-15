@@ -452,21 +452,39 @@ static void PlayStaticNoise(void) {
    WHDR_DONE 될 때마다 다시 큐에 넣는 방식(수동 반복) -- 매 프레임 폴링. */
 
 #define MUSIC_SAMPLE_RATE 8000
-#define MUSIC_BPM 100  /* 정수 연산으로만 계산해야 배열 크기로 쓸 때 컴파일 타임 상수로 확실히 접힘 */
-#define MUSIC_STEP_SAMPLES (MUSIC_SAMPLE_RATE * 60 / MUSIC_BPM / 2) /* 8분음표 */
-#define MUSIC_STEPS 16
+#define MUSIC_BPM 92  /* 정수 연산으로만 계산해야 배열 크기로 쓸 때 컴파일 타임 상수로 확실히 접힘 */
+#define MUSIC_STEP_SAMPLES (MUSIC_SAMPLE_RATE * 60 / MUSIC_BPM / 4) /* 16분음표 */
+#define MUSIC_QUARTER_SAMPLES (MUSIC_STEP_SAMPLES * 4)
+#define MUSIC_STEPS 64  /* 16분음표 x 64 = 4마디 */
 #define MUSIC_TOTAL_SAMPLES (MUSIC_STEP_SAMPLES * MUSIC_STEPS)
 
-/* 전장/행군 느낌: 저음 베이스(오스티나토) + 쿵(킥) + 탁(스네어풍 노이즈) 3레이어를
-   섞어서 하나의 PCM 버퍼에 합성한다. 0은 쉼표/없음. */
-static const float MUSIC_BASS_NOTES[MUSIC_STEPS] = {
-    55.00f, 0.0f, 0.0f, 0.0f,  82.41f, 0.0f, 0.0f, 0.0f,
-    87.31f, 0.0f, 0.0f, 0.0f,  65.41f, 0.0f, 55.00f, 0.0f
+/* 참고 트랙(war.mp3, Suno로 만든 21초짜리 전쟁 테마) 분석 결과를 참고해서 새로 작곡함
+   (템포/음계 자기상관·크로마 분석 -- ffmpeg로 wav 변환 후 python으로 추출):
+     - 템포 약 92 BPM
+     - 크로마 상위: G, A, D, Bb, C / D#(Eb)는 최하위 -- 자연 6도가 살아있는 G 도리안
+       (G-A-Bb-C-D-E-F)로 해석. 전쟁/영화음악에서 흔한 "비장한 단조" 색.
+     - 곡 전체에 걸쳐 에너지가 꾸준히 상승(4등분 RMS 0.119->0.143) -- 서서히 고조되는 구조
+   실제 멜로디를 옮긴 게 아니라 이 특징(템포/조성/고조 곡선)만 참고해서 완전히 새로
+   작곡함 -- 저작권 + 콘테스트 원작 규정 때문에 원곡 전사(transcription)는 안 함.
+   NES식 4채널(사각파 리드/삼각파 베이스/노이즈 타악기) 구성은 유지. 0은 쉼표. */
+static const float MUSIC_LEAD_NOTES[MUSIC_STEPS] = {
+    /* 마디1 -- 낮고 성긴, 조용히 다가오는 느낌 (G 도리안) */
+    196.00f,0,0,0, 233.08f,0,0,0, 261.63f,0,0,0, 196.00f,0,0,0,
+    /* 마디2 -- 조금 더 움직임 */
+    196.00f,0,233.08f,0, 293.66f,0,261.63f,0, 233.08f,0,196.00f,0, 220.00f,0,0,0,
+    /* 마디3 -- 한 옥타브 위로, 리듬도 촘촘하게 */
+    293.66f,0,349.23f,0, 392.00f,0,349.23f,0, 293.66f,0,261.63f,0, 233.08f,0,261.63f,0,
+    /* 마디4 -- 절정, 가장 높고 꽉 참 */
+    392.00f,0,466.16f,0, 587.33f,0,523.25f,0, 466.16f,0,392.00f,0, 349.23f,0,293.66f,0
 };
-/* 4분음표마다(스텝 0,4,8,12) 쿵 -- 규칙적인 행군 박자 */
-static const int MUSIC_KICK[MUSIC_STEPS]  = { 1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0 };
-/* 그 사이 뒷박(스텝 2,6,10,14)에 탁 -- 고전적인 "쿵-탁-쿵-탁" 행진 리듬 */
-static const int MUSIC_SNARE[MUSIC_STEPS] = { 0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,0 };
+/* 마디별 베이스 근음 -- G 도리안 vamp: i - bVII - i - bIII (G - F - G - Bb) */
+static const float MUSIC_BASS_PER_BAR[4] = { 98.00f, 87.31f, 98.00f, 116.54f };
+/* 참고 트랙처럼 마디가 갈수록 커지는 다이내믹(고조) -- 전 레이어 진폭에 곱함 */
+static const float MUSIC_BAR_VOLUME[4] = { 0.70f, 0.85f, 1.00f, 1.15f };
+
+/* 4분음표(로컬스텝 0,4,8,12)마다 쿵, 그 사이 뒷박(2,6,10,14)마다 탁 -- 마디마다 반복 */
+static const int MUSIC_KICK_LOCAL[16]  = { 1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0 };
+static const int MUSIC_SNARE_LOCAL[16] = { 0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,0 };
 
 #define MUSIC_KICK_SAMPLES (MUSIC_SAMPLE_RATE / 12)   /* ~83ms */
 #define MUSIC_SNARE_SAMPLES (MUSIC_SAMPLE_RATE / 10)  /* ~100ms */
@@ -479,38 +497,54 @@ static BOOL g_musicPlaying = FALSE;
 
 static void GenerateMusicLoop(void) {
     for (int i = 0; i < MUSIC_TOTAL_SAMPLES; i++) {
-        int step = i / MUSIC_STEP_SAMPLES;
+        int step = i / MUSIC_STEP_SAMPLES;       /* 0..63, 16분음표 단위 */
         int posInStep = i % MUSIC_STEP_SAMPLES;
+        int bar = step / 16;                      /* 0..3 */
+        int localStep = step % 16;
+
         float mix = 0.0f;
 
-        /* 베이스 -- 퉁기는 사각파 오스티나토 */
-        float bassFreq = MUSIC_BASS_NOTES[step];
-        if (bassFreq > 0.0f) {
+        /* 리드 멜로디 -- 밝은 사각파. NES 액션게임 특유의 또렷한 리드 채널 느낌 */
+        float leadFreq = MUSIC_LEAD_NOTES[step];
+        if (leadFreq > 0.0f) {
             float t = (float)posInStep / (float)MUSIC_STEP_SAMPLES;
-            float envelope = expf(-t * 5.0f);
-            int fadeIn = 40;
+            float envelope = expf(-t * 3.0f);
+            int fadeIn = 20;
             if (posInStep < fadeIn) envelope *= (float)posInStep / (float)fadeIn;
-            float phase = fmodf(bassFreq * (float)i / (float)MUSIC_SAMPLE_RATE, 1.0f);
+            float phase = fmodf(leadFreq * (float)i / (float)MUSIC_SAMPLE_RATE, 1.0f);
             float square = (phase < 0.5f) ? 1.0f : -1.0f;
-            mix += square * envelope * 20.0f;
+            mix += square * envelope * 26.0f;
+        }
+
+        /* 베이스 -- 삼각파(NES 베이스 채널 흉내), 4분음표마다 마디의 근음을 퉁김 */
+        if (localStep % 4 == 0) {
+            float bassFreq = MUSIC_BASS_PER_BAR[bar];
+            int posInQuarter = i % MUSIC_QUARTER_SAMPLES;
+            float t = (float)posInQuarter / (float)MUSIC_QUARTER_SAMPLES;
+            float envelope = expf(-t * 3.0f);
+            float phase = fmodf(bassFreq * (float)i / (float)MUSIC_SAMPLE_RATE, 1.0f);
+            float tri = 4.0f * fabsf(phase - 0.5f) - 1.0f;
+            mix += tri * envelope * 24.0f;
         }
 
         /* 킥(쿵) -- 피치가 빠르게 떨어지는 사인 버스트, 대포 같은 둔중한 타격감 */
-        if (MUSIC_KICK[step] && posInStep < MUSIC_KICK_SAMPLES) {
+        if (MUSIC_KICK_LOCAL[localStep] && posInStep < MUSIC_KICK_SAMPLES) {
             float kt = (float)posInStep / (float)MUSIC_KICK_SAMPLES;
             float kickFreq = 90.0f - kt * 50.0f;
             float kenv = expf(-kt * 8.0f);
             float ksin = sinf(2.0f * PI_F * kickFreq * (float)posInStep / (float)MUSIC_SAMPLE_RATE);
-            mix += ksin * kenv * 55.0f;
+            mix += ksin * kenv * 50.0f;
         }
 
         /* 스네어(탁) -- 짧게 끊어지는 노이즈 버스트 */
-        if (MUSIC_SNARE[step] && posInStep < MUSIC_SNARE_SAMPLES) {
+        if (MUSIC_SNARE_LOCAL[localStep] && posInStep < MUSIC_SNARE_SAMPLES) {
             float st = (float)posInStep / (float)MUSIC_SNARE_SAMPLES;
             float senv = expf(-st * 10.0f);
             int n = (rand() % 256) - 128;
-            mix += (float)n * senv * 0.35f;
+            mix += (float)n * senv * 0.30f;
         }
+
+        mix *= MUSIC_BAR_VOLUME[bar]; /* 참고 트랙처럼 마디가 갈수록 고조되는 다이내믹 */
 
         int v = 128 + (int)mix;
         if (v < 0) v = 0;
