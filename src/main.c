@@ -126,6 +126,10 @@ static const float BUBBLE_PHASE_DUR_CHARGE[8] = {
 #define CHARGE_BUBBLE_Y 130
 #define CHARGE_BUBBLE_W 240
 #define CHARGE_BUBBLE_H 100
+#define CHARGE_TARGET_MIN 10  /* 원반 값(1~5)만으로는 절대 한 방에 안 맞아서 항상 여러 개를 조합해야 함 */
+#define CHARGE_TARGET_MAX 18
+#define CHARGE_DISK_MIN 1
+#define CHARGE_DISK_MAX 5
 
 typedef enum { FIRESTAGE_AZIMUTH, FIRESTAGE_ELEVATION, FIRESTAGE_FIRE, FIRESTAGE_CHARGE } FireStage;
 typedef enum { TRANS_NONE, TRANS_OUT, TRANS_IN } TransState;
@@ -358,7 +362,7 @@ static void PlayStaticNoise(void) {
         int n = rand() % 256;
         if ((rand() % 100) < 15) n = (rand() % 2) ? 255 : 0;
         float envelope = 1.0f - (float)i / (float)STATIC_SND_SAMPLES * 0.3f;
-        int centered = (int)(((float)n - 128.0f) * envelope * 0.5f) + 128;  /* *0.5f = 볼륨 50%로 축소 */
+        int centered = (int)(((float)n - 128.0f) * envelope * 0.2f) + 128;  /* 0.5 -> 0.2로 추가 축소 (여전히 크다는 피드백) */
         if (centered < 0) centered = 0;
         if (centered > 255) centered = 255;
         g_staticBuf[i] = (unsigned char)centered;
@@ -498,13 +502,23 @@ static void EnterGameplay(void) {
     draggingLever = FALSE;
 }
 
-/* 3단계(사격) 통과 후 4단계 진입 시 무더기를 새로 쌓는다. 목표 번호는 항상
-   최소 한 번은 무더기 안에 존재하도록 인덱스 0에 강제로 심어둔다(운 나쁘면
-   20개 다 다른 번호라 목표가 아예 안 나올 수 있어서 -- 확률은 낮지만 방지). */
+/* 3단계(사격) 통과 후 4단계 진입 시 무더기를 새로 쌓는다. 목표가 10~18이라
+   원반 하나(1~5) 값으로는 절대 못 맞추고 항상 여러 개를 더해야 한다. 풀이가
+   반드시 존재하도록, 목표를 정확히 채우는 원반 조합을 먼저 만들어서 앞쪽
+   인덱스에 심어두고 나머지는 전부 랜덤(미끼)으로 채운다. */
 static void EnterChargeStage(void) {
-    chargeTargetNumber = 1 + rand() % 5;
+    chargeTargetNumber = CHARGE_TARGET_MIN + rand() % (CHARGE_TARGET_MAX - CHARGE_TARGET_MIN + 1);
+    int remaining = chargeTargetNumber;
+    int solutionCount = 0;
+    while (remaining > 0 && solutionCount < CHARGE_COUNT - 1) {
+        int v = CHARGE_DISK_MIN + rand() % (CHARGE_DISK_MAX - CHARGE_DISK_MIN + 1);
+        if (v > remaining) v = remaining;
+        chargeNumber[solutionCount] = v;
+        remaining -= v;
+        solutionCount++;
+    }
     for (int i = 0; i < CHARGE_COUNT; i++) {
-        chargeNumber[i] = (i == 0) ? chargeTargetNumber : (1 + rand() % 5);
+        if (i >= solutionCount) chargeNumber[i] = CHARGE_DISK_MIN + rand() % (CHARGE_DISK_MAX - CHARGE_DISK_MIN + 1);
         chargeX[i] = (float)(CHARGE_PILE_CX - CHARGE_PILE_SPREAD_X + rand() % (2 * CHARGE_PILE_SPREAD_X + 1));
         chargeY[i] = (float)(CHARGE_PILE_CY - CHARGE_PILE_SPREAD_Y + rand() % (2 * CHARGE_PILE_SPREAD_Y + 1));
         chargeZ[i] = i;
