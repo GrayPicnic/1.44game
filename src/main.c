@@ -162,6 +162,8 @@ static float leverFlash = 0.0f;
 static BOOL draggingLever = FALSE;
 static float lastDragAngle = 0.0f;
 static int lastDragMouseY = 0;
+static int azLastTickMil = -1;   /* 방위각 틱 사운드 기준점(1밀 넘어갈 때마다 재생) */
+static int elLastTickMil = -1;   /* 사각 틱 사운드 기준점 */
 
 static BOOL missionFailed = FALSE;
 static float failTimer = 0.0f;
@@ -454,6 +456,79 @@ static void PlayStaticNoise(void) {
     g_waveHdr.dwBufferLength = STATIC_SND_SAMPLES;
     waveOutPrepareHeader(g_waveOut, &g_waveHdr, sizeof(WAVEHDR));
     waveOutWrite(g_waveOut, &g_waveHdr, sizeof(WAVEHDR));
+}
+
+/* ---------- 조작 틱/명중 사운드: 레버·릴 드래그 중 "띠리릭" 틱음 + 3단계 명중음 ----------
+   둘 다 짧고 자주 재생될 수 있어서 SFX/BGM/War와는 또 다른 전용 waveOut 핸들을 씀. */
+#define TICK_SAMPLE_RATE 8000
+#define TICK_SAMPLES (TICK_SAMPLE_RATE * 25 / 1000)  /* 25ms 짧은 클릭 */
+#define HIT_SAMPLES (TICK_SAMPLE_RATE * 12 / 100)    /* 120ms 상승 차임 */
+
+static HWAVEOUT g_waveOutTick = NULL;
+static WAVEHDR g_tickHdr;
+static unsigned char g_tickBuf[TICK_SAMPLES];
+static unsigned char g_hitBuf[HIT_SAMPLES];
+static BOOL g_tickOutOpen = FALSE;
+
+static void InitTick(void) {
+    WAVEFORMATEX wfx;
+    ZeroMemory(&wfx, sizeof(wfx));
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = 1;
+    wfx.nSamplesPerSec = TICK_SAMPLE_RATE;
+    wfx.wBitsPerSample = 8;
+    wfx.nBlockAlign = 1;
+    wfx.nAvgBytesPerSec = TICK_SAMPLE_RATE;
+    if (waveOutOpen(&g_waveOutTick, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR) {
+        g_tickOutOpen = TRUE;
+    }
+}
+
+/* 레버/릴이 1밀 단위로 넘어갈 때마다 짧게 딸깍 -- 빠르게 돌리면 자연히 "띠리릭"처럼 연속으로 들림 */
+static void PlayTick(void) {
+    if (!soundOn || !g_tickOutOpen) return;
+    waveOutReset(g_waveOutTick);
+    if (g_tickHdr.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
+
+    float freq = 950.0f;
+    for (int i = 0; i < TICK_SAMPLES; i++) {
+        float t = (float)i / (float)TICK_SAMPLES;
+        float env = expf(-t * 20.0f);
+        float s = sinf(2.0f * PI_F * freq * (float)i / (float)TICK_SAMPLE_RATE);
+        int v = 128 + (int)(s * env * 30.0f);
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        g_tickBuf[i] = (unsigned char)v;
+    }
+    ZeroMemory(&g_tickHdr, sizeof(WAVEHDR));
+    g_tickHdr.lpData = (LPSTR)g_tickBuf;
+    g_tickHdr.dwBufferLength = TICK_SAMPLES;
+    waveOutPrepareHeader(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
+    waveOutWrite(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
+}
+
+/* 3단계 명중 시 상승 차임 -- 틱과 같은 핸들을 재사용(동시에 울릴 일이 없음: 드래그 중엔
+   3단계에 없고, 3단계에선 드래그를 안 함) */
+static void PlayHitSound(void) {
+    if (!soundOn || !g_tickOutOpen) return;
+    waveOutReset(g_waveOutTick);
+    if (g_tickHdr.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
+
+    for (int i = 0; i < HIT_SAMPLES; i++) {
+        float t = (float)i / (float)HIT_SAMPLES;
+        float freq = 500.0f + t * 700.0f; /* 500 -> 1200Hz로 상승 */
+        float env = expf(-t * 5.0f);
+        float s = sinf(2.0f * PI_F * freq * (float)i / (float)TICK_SAMPLE_RATE);
+        int v = 128 + (int)(s * env * 50.0f);
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        g_hitBuf[i] = (unsigned char)v;
+    }
+    ZeroMemory(&g_tickHdr, sizeof(WAVEHDR));
+    g_tickHdr.lpData = (LPSTR)g_hitBuf;
+    g_tickHdr.dwBufferLength = HIT_SAMPLES;
+    waveOutPrepareHeader(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
+    waveOutWrite(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
 }
 
 /* ---------- BGM: 칩튠 베이스라인도 코드로 직접 합성 (오디오 파일 0개 원칙 유지) ----------
@@ -1065,7 +1140,7 @@ static void UpdateGameplay(float dt) {
     }
 
     if (fireStage == FIRESTAGE_FIRE) {
-        /* 3단계: 게이지 위를 오가는 불릿을 붉은 표시와 맞춰 스페이스로 저격 */
+        /* 3단계: 게이지 위를 오가는 불릿을 붉은 표시와 맞춰 좌클릭으로 저격 */
         fireBulletPos += fireBulletDir * (fireBulletSpeed / (float)FIRE_GAUGE_W) * dt;
         if (fireBulletPos >= 1.0f) { fireBulletPos = 1.0f; fireBulletDir = -1.0f; }
         if (fireBulletPos <= 0.0f) { fireBulletPos = 0.0f; fireBulletDir = 1.0f; }
@@ -1074,13 +1149,14 @@ static void UpdateGameplay(float dt) {
                        ((float)(FIRE_SQUARE_START_X - FIRE_SQUARE_MIN_X) / (float)FIRE_HITS_REQUIRED);
         fireSquareX += (target - fireSquareX) * dt * 8.0f;
 
-        if (keys[VK_SPACE] && !keysPrev[VK_SPACE]) {
+        if (mouseDown && !mouseDownPrev) {
             float bulletPx = fireBulletPos * (float)FIRE_GAUGE_W;
             float markPx = fireMarkPos * (float)FIRE_GAUGE_W;
             if (fabsf(bulletPx - markPx) <= FIRE_MARK_TOLERANCE_PX) {
                 fireHits++;
                 fireBulletSpeed += FIRE_BULLET_SPEED_STEP;
                 leverFlash = LEVER_FLASH_TIME;
+                PlayHitSound();
                 fireMarkPos = 0.08f + (float)(rand() % 840) / 1000.0f;
                 if (fireHits >= FIRE_HITS_REQUIRED) {
                     fireStageFailed = FALSE;
@@ -1151,6 +1227,7 @@ static void UpdateGameplay(float dt) {
         if (mouseDown && !mouseDownPrev && distToPivot <= leverPivotGrabR) {
             draggingLever = TRUE;
             lastDragAngle = atan2f((float)dy, (float)dx) * 180.0f / PI_F;
+            azLastTickMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
         }
         if (!mouseDown) draggingLever = FALSE;
         if (draggingLever) {
@@ -1160,6 +1237,12 @@ static void UpdateGameplay(float dt) {
             while (delta < -180.0f) delta += 360.0f;
             azAngleDeg += delta;
             lastDragAngle = curAngle;
+            /* 1밀 단위로 넘어갈 때마다 짧게 딸깍 -- 빠르게 돌리면 "띠리릭" 연속음처럼 들림 */
+            int curTickMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
+            if (curTickMil != azLastTickMil) {
+                PlayTick();
+                azLastTickMil = curTickMil;
+            }
         }
 
         /* 우클릭: 바늘 현재 각도 기준 미세조정 (밀 단위 스텝, 기어비 반영) */
@@ -1193,6 +1276,7 @@ static void UpdateGameplay(float dt) {
             draggingLever = TRUE;
             lastDragMouseY = mouseY;
             elVelocity = 0.0f;
+            elLastTickMil = (int)(elCurrentMil + 0.5f);
         }
         if (draggingLever && !mouseDown) draggingLever = FALSE;
 
@@ -1205,6 +1289,11 @@ static void UpdateGameplay(float dt) {
             if (dt > 0.0001f) elVelocity = elVelocity * 0.7f + (deltaMil / dt) * 0.3f;
             if (elCurrentMil < EL_ADJUST_MIN) { elCurrentMil = EL_ADJUST_MIN; elVelocity = 0.0f; }
             if (elCurrentMil > EL_ADJUST_MAX) { elCurrentMil = EL_ADJUST_MAX; elVelocity = 0.0f; }
+            int curTickMil = (int)(elCurrentMil + 0.5f);
+            if (curTickMil != elLastTickMil) {
+                PlayTick();
+                elLastTickMil = curTickMil;
+            }
         } else if (fabsf(elVelocity) > EL_VELOCITY_STOP_MIL) {
             /* 손 뗀 뒤 관성으로 계속 미끄러지다가 마찰로 서서히 멈춤 (휴대폰 슬라이드 느낌) */
             elCurrentMil += elVelocity * dt;
@@ -1213,6 +1302,11 @@ static void UpdateGameplay(float dt) {
             elVelocity *= decay;
             if (elCurrentMil < EL_ADJUST_MIN) { elCurrentMil = EL_ADJUST_MIN; elVelocity = 0.0f; }
             if (elCurrentMil > EL_ADJUST_MAX) { elCurrentMil = EL_ADJUST_MAX; elVelocity = 0.0f; }
+            int curTickMil = (int)(elCurrentMil + 0.5f);
+            if (curTickMil != elLastTickMil) {
+                PlayTick();
+                elLastTickMil = curTickMil;
+            }
         } else {
             elVelocity = 0.0f;
         }
@@ -1349,6 +1443,9 @@ static void RenderGameplay(void) {
             FillPixelRect((int)fireSquareX, FIRE_SQUARE_Y, FIRE_SQUARE_SIZE, FIRE_SQUARE_SIZE, 0xFF3CFF6E);
             DrawRectOutline((int)fireSquareX, FIRE_SQUARE_Y, FIRE_SQUARE_SIZE, FIRE_SQUARE_SIZE, 0xFFEEEEEE);
 
+            /* 우측 게이지 위 안내문구 -- 방위각/사각 스테이지의 "잡고 돌리시오"류와 같은 자리 */
+            QueueTextCentered(FIRE_GAUGE_X - 25, FIRE_GAUGE_Y - 26, FIRE_GAUGE_W + 50, 20, 0,
+                               0xFFEEEEEE, Kor("좌클릭으로 발사"));
             DrawRectOutline(FIRE_GAUGE_X, FIRE_GAUGE_Y, FIRE_GAUGE_W, FIRE_GAUGE_H, 0xFFAAAAAA);
             /* 붉은 표시 폭 = 실제 명중 판정 허용폭(FIRE_MARK_TOLERANCE_PX)의 2배 -- 눈에 보이는
                빨간 구간이 곧 정확한 히트 존이 되도록, 그리고 불릿보다 확실히 길게 */
@@ -1389,7 +1486,7 @@ static void RenderGameplay(void) {
             QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("우클릭: 미세 조정"));
             QueueTextPoint(200, GAME_H - 20, 0, 0xFFAAAAAA, Kor("스페이스: 확정"));
         } else if (fireStage == FIRESTAGE_FIRE) {
-            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("표시와 겹칠 때 스페이스로 발사"));
+            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("표시와 겹칠 때 좌클릭으로 발사"));
         } else {
             QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("드래그로 치우고 합이 맞게 통에 넣으시오"));
         }
@@ -1511,6 +1608,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     InitAudio();
     InitMusic();
     InitWar();
+    InitTick();
 
     char lobbyBgPath[MAX_PATH];
     GetAssetPath(lobbyBgPath, MAX_PATH, "images\\Lobby.bmp");
@@ -1603,6 +1701,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     if (g_waveOutOpen) waveOutClose(g_waveOut);
     if (g_musicOutOpen) { waveOutReset(g_waveOutMusic); waveOutClose(g_waveOutMusic); }
     if (g_warOutOpen) { waveOutReset(g_waveOutWar); waveOutClose(g_waveOutWar); }
+    if (g_tickOutOpen) { waveOutReset(g_waveOutTick); waveOutClose(g_waveOutTick); }
     SelectObject(g_hdc, g_memBitmapOld);
     DeleteObject(g_memBitmap);
     DeleteDC(g_hdc);
