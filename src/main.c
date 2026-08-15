@@ -452,7 +452,7 @@ static void PlayStaticNoise(void) {
    WHDR_DONE 될 때마다 다시 큐에 넣는 방식(수동 반복) -- 매 프레임 폴링. */
 
 #define MUSIC_SAMPLE_RATE 8000
-#define MUSIC_BPM 92  /* 정수 연산으로만 계산해야 배열 크기로 쓸 때 컴파일 타임 상수로 확실히 접힘 */
+#define MUSIC_BPM 72  /* 92 -> 72로 늦춤(더 무겁게 끄는 행군) -- 정수 연산으로만 계산 */
 #define MUSIC_STEP_SAMPLES (MUSIC_SAMPLE_RATE * 60 / MUSIC_BPM / 4) /* 16분음표 */
 #define MUSIC_QUARTER_SAMPLES (MUSIC_STEP_SAMPLES * 4)
 #define MUSIC_STEPS 64  /* 16분음표 x 64 = 4마디 */
@@ -467,15 +467,16 @@ static void PlayStaticNoise(void) {
    실제 멜로디를 옮긴 게 아니라 이 특징(템포/조성/고조 곡선)만 참고해서 완전히 새로
    작곡함 -- 저작권 + 콘테스트 원작 규정 때문에 원곡 전사(transcription)는 안 함.
    NES식 4채널(사각파 리드/삼각파 베이스/노이즈 타악기) 구성은 유지. 0은 쉼표. */
+/* 전체를 한 옥타브 내려서(2분의 1 주파수) 더 낮고 묵직한 톤으로 -- 멜로디 윤곽은 그대로 */
 static const float MUSIC_LEAD_NOTES[MUSIC_STEPS] = {
     /* 마디1 -- 낮고 성긴, 조용히 다가오는 느낌 (G 도리안) */
-    196.00f,0,0,0, 233.08f,0,0,0, 261.63f,0,0,0, 196.00f,0,0,0,
+    98.00f,0,0,0, 116.54f,0,0,0, 130.81f,0,0,0, 98.00f,0,0,0,
     /* 마디2 -- 조금 더 움직임 */
-    196.00f,0,233.08f,0, 293.66f,0,261.63f,0, 233.08f,0,196.00f,0, 220.00f,0,0,0,
-    /* 마디3 -- 한 옥타브 위로, 리듬도 촘촘하게 */
-    293.66f,0,349.23f,0, 392.00f,0,349.23f,0, 293.66f,0,261.63f,0, 233.08f,0,261.63f,0,
-    /* 마디4 -- 절정, 가장 높고 꽉 참 */
-    392.00f,0,466.16f,0, 587.33f,0,523.25f,0, 466.16f,0,392.00f,0, 349.23f,0,293.66f,0
+    98.00f,0,116.54f,0, 146.83f,0,130.81f,0, 116.54f,0,98.00f,0, 110.00f,0,0,0,
+    /* 마디3 -- 한 옥타브 위로(원래 대비는 유지), 리듬도 촘촘하게 */
+    146.83f,0,174.61f,0, 196.00f,0,174.61f,0, 146.83f,0,130.81f,0, 116.54f,0,130.81f,0,
+    /* 마디4 -- 절정, 가장 높고 꽉 참(그래도 원래보다 한 옥타브 낮음) */
+    196.00f,0,233.08f,0, 293.66f,0,261.63f,0, 233.08f,0,196.00f,0, 174.61f,0,146.83f,0
 };
 /* 마디별 베이스 근음 -- G 도리안 vamp: i - bVII - i - bIII (G - F - G - Bb) */
 static const float MUSIC_BASS_PER_BAR[4] = { 98.00f, 87.31f, 98.00f, 116.54f };
@@ -530,7 +531,7 @@ static void GenerateMusicLoop(void) {
         /* 킥(쿵) -- 피치가 빠르게 떨어지는 사인 버스트, 대포 같은 둔중한 타격감 */
         if (MUSIC_KICK_LOCAL[localStep] && posInStep < MUSIC_KICK_SAMPLES) {
             float kt = (float)posInStep / (float)MUSIC_KICK_SAMPLES;
-            float kickFreq = 90.0f - kt * 50.0f;
+            float kickFreq = 65.0f - kt * 40.0f; /* 90->40에서 65->25로 더 낮고 묵직하게 */
             float kenv = expf(-kt * 8.0f);
             float ksin = sinf(2.0f * PI_F * kickFreq * (float)posInStep / (float)MUSIC_SAMPLE_RATE);
             mix += ksin * kenv * 50.0f;
@@ -569,10 +570,12 @@ static void InitMusic(void) {
 }
 
 /* 매 프레임 호출 -- 재생 중인 버퍼가 끝났으면(WHDR_DONE) 곧바로 같은 버퍼를 다시 큐에 넣어
-   무한 반복시킨다. soundOn이 꺼지면 즉시 waveOutReset으로 멈춤. */
+   무한 반복시킨다. soundOn이 꺼지거나 로비/옵션이 아니면(게임 시작 후에는 전쟁 앰비언스로
+   바뀌므로) 즉시 waveOutReset으로 멈춤. */
 static void UpdateMusicLoop(void) {
     if (!g_musicOutOpen) return;
-    if (!soundOn) {
+    BOOL shouldPlay = soundOn && (scene == SCENE_LOBBY || scene == SCENE_OPTIONS);
+    if (!shouldPlay) {
         if (g_musicPlaying) {
             waveOutReset(g_waveOutMusic);
             g_musicPlaying = FALSE;
@@ -587,6 +590,135 @@ static void UpdateMusicLoop(void) {
         waveOutPrepareHeader(g_waveOutMusic, &g_musicHdr, sizeof(WAVEHDR));
         waveOutWrite(g_waveOutMusic, &g_musicHdr, sizeof(WAVEHDR));
         g_musicPlaying = TRUE;
+    }
+}
+
+/* ---------- 전쟁 앰비언스: 게임 시작(인트로) 이후 폭발/총성이 섞여 도는 배경음 ----------
+   BGM과 마찬가지로 waveOut 핸들을 하나 더 열어(g_waveOutWar) 미리 렌더링한 루프 버퍼를
+   반복 재생한다. 폭발/총성 타이밍은 매번 랜덤이 아니라 코드에 고정으로 심어둔 것(사용자
+   요청-- "랜덤이면 좋지만 코드로 고정 타이밍이어도 됨") -- 대신 간격을 불규칙하게 배치해서
+   랜덤처럼 들리게 함. 미션 성공(RESULT_HIT) 순간 바로 멈춘다. */
+#define WAR_SAMPLE_RATE 8000
+#define WAR_LOOP_SECONDS 12
+#define WAR_TOTAL_SAMPLES (WAR_SAMPLE_RATE * WAR_LOOP_SECONDS)
+
+/* 폭발 발생 시각(초) -- 낙하하는 휘파람 + 뒤이은 저음 붐 */
+static const float WAR_EXPLOSION_TIMES[] = { 1.5f, 5.2f, 9.0f };
+#define WAR_EXPLOSION_COUNT (int)(sizeof(WAR_EXPLOSION_TIMES) / sizeof(WAR_EXPLOSION_TIMES[0]))
+
+/* 총성 버스트: 시작 시각 + 발사 수 + 발사 간격(초) -- 자동사격처럼 여러 발이 연달아 남 */
+typedef struct { float startSec; int shots; float shotGapSec; } WarGunBurst;
+static const WarGunBurst WAR_GUN_BURSTS[] = {
+    { 0.5f, 3, 0.09f }, { 3.0f, 5, 0.07f }, { 6.5f, 2, 0.10f },
+    { 8.0f, 4, 0.08f }, { 10.5f, 1, 0.0f },
+};
+#define WAR_GUN_BURST_COUNT (int)(sizeof(WAR_GUN_BURSTS) / sizeof(WAR_GUN_BURSTS[0]))
+
+static HWAVEOUT g_waveOutWar = NULL;
+static WAVEHDR g_warHdr;
+static unsigned char g_warBuf[WAR_TOTAL_SAMPLES];
+static BOOL g_warOutOpen = FALSE;
+static BOOL g_warPlaying = FALSE;
+
+static void GenerateWarLoop(void) {
+    static float mixBuf[WAR_TOTAL_SAMPLES];
+
+    /* 배경에 아주 옅은 저음 바람/원거리 포성 느낌의 브라운노이즈를 깔아둔다 */
+    float brown = 0.0f;
+    for (int i = 0; i < WAR_TOTAL_SAMPLES; i++) {
+        float whiteN = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
+        brown += whiteN * 0.02f;
+        if (brown > 1.0f) brown = 1.0f;
+        if (brown < -1.0f) brown = -1.0f;
+        mixBuf[i] = brown * 5.0f;
+    }
+
+    /* 폭발: 고음에서 저음으로 떨어지는 휘파람(낙하) 다음에 묵직한 저음+노이즈 붐(폭발) */
+    for (int e = 0; e < WAR_EXPLOSION_COUNT; e++) {
+        int base = (int)(WAR_EXPLOSION_TIMES[e] * WAR_SAMPLE_RATE);
+        int whistleLen = (int)(0.45f * WAR_SAMPLE_RATE);
+        for (int j = 0; j < whistleLen; j++) {
+            int idx = base + j;
+            if (idx < 0 || idx >= WAR_TOTAL_SAMPLES) continue;
+            float t = (float)j / (float)whistleLen;
+            float freq = 1300.0f - t * 1100.0f;
+            float env = (1.0f - t) * 0.5f;
+            float s = sinf(2.0f * PI_F * freq * (float)j / (float)WAR_SAMPLE_RATE);
+            mixBuf[idx] += s * env * 14.0f;
+        }
+        int boomStart = base + whistleLen;
+        int boomLen = (int)(1.0f * WAR_SAMPLE_RATE);
+        for (int j = 0; j < boomLen; j++) {
+            int idx = boomStart + j;
+            if (idx < 0 || idx >= WAR_TOTAL_SAMPLES) continue;
+            float t = (float)j / (float)boomLen;
+            float env = expf(-t * 3.5f);
+            float lowFreq = 55.0f - t * 30.0f;
+            float s = sinf(2.0f * PI_F * lowFreq * (float)j / (float)WAR_SAMPLE_RATE);
+            float n = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
+            mixBuf[idx] += (s * 0.6f + n * 0.4f) * env * 70.0f;
+        }
+    }
+
+    /* 총성: 짧고 날카로운 노이즈 클릭을 자동사격처럼 여러 발 연달아 */
+    for (int b = 0; b < WAR_GUN_BURST_COUNT; b++) {
+        for (int s = 0; s < WAR_GUN_BURSTS[b].shots; s++) {
+            int base = (int)((WAR_GUN_BURSTS[b].startSec + (float)s * WAR_GUN_BURSTS[b].shotGapSec) * WAR_SAMPLE_RATE);
+            int shotLen = (int)(0.03f * WAR_SAMPLE_RATE);
+            for (int j = 0; j < shotLen; j++) {
+                int idx = base + j;
+                if (idx < 0 || idx >= WAR_TOTAL_SAMPLES) continue;
+                float t = (float)j / (float)shotLen;
+                float env = expf(-t * 18.0f);
+                float n = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
+                mixBuf[idx] += n * env * 45.0f;
+            }
+        }
+    }
+
+    for (int i = 0; i < WAR_TOTAL_SAMPLES; i++) {
+        int v = 128 + (int)mixBuf[i];
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        g_warBuf[i] = (unsigned char)v;
+    }
+}
+
+static void InitWar(void) {
+    WAVEFORMATEX wfx;
+    ZeroMemory(&wfx, sizeof(wfx));
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = 1;
+    wfx.nSamplesPerSec = WAR_SAMPLE_RATE;
+    wfx.wBitsPerSample = 8;
+    wfx.nBlockAlign = 1;
+    wfx.nAvgBytesPerSec = WAR_SAMPLE_RATE;
+    if (waveOutOpen(&g_waveOutWar, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR) {
+        g_warOutOpen = TRUE;
+        GenerateWarLoop();
+    }
+}
+
+/* 인트로/게임플레이 중에만, 그리고 미션 성공(RESULT_HIT) 전까지만 재생 */
+static void UpdateWarLoop(void) {
+    if (!g_warOutOpen) return;
+    BOOL inMission = (scene == SCENE_INTRO || scene == SCENE_GAMEPLAY);
+    BOOL shouldPlay = soundOn && inMission && finalResult != RESULT_HIT;
+    if (!shouldPlay) {
+        if (g_warPlaying) {
+            waveOutReset(g_waveOutWar);
+            g_warPlaying = FALSE;
+        }
+        return;
+    }
+    if (!g_warPlaying || (g_warHdr.dwFlags & WHDR_DONE)) {
+        if (g_warHdr.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(g_waveOutWar, &g_warHdr, sizeof(WAVEHDR));
+        ZeroMemory(&g_warHdr, sizeof(WAVEHDR));
+        g_warHdr.lpData = (LPSTR)g_warBuf;
+        g_warHdr.dwBufferLength = WAR_TOTAL_SAMPLES;
+        waveOutPrepareHeader(g_waveOutWar, &g_warHdr, sizeof(WAVEHDR));
+        waveOutWrite(g_waveOutWar, &g_warHdr, sizeof(WAVEHDR));
+        g_warPlaying = TRUE;
     }
 }
 
@@ -1313,6 +1445,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     timeBeginPeriod(1);
     InitAudio();
     InitMusic();
+    InitWar();
 
     char lobbyBgPath[MAX_PATH];
     GetAssetPath(lobbyBgPath, MAX_PATH, "images\\Lobby.bmp");
@@ -1389,6 +1522,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
         UpdateGame(dt);
         RenderGame();
         UpdateMusicLoop();
+        UpdateWarLoop();
 
         RECT client;
         GetClientRect(hwnd, &client);
@@ -1403,6 +1537,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     DeleteObject(g_fontLarge);
     if (g_waveOutOpen) waveOutClose(g_waveOut);
     if (g_musicOutOpen) { waveOutReset(g_waveOutMusic); waveOutClose(g_waveOutMusic); }
+    if (g_warOutOpen) { waveOutReset(g_waveOutWar); waveOutClose(g_waveOutWar); }
     SelectObject(g_hdc, g_memBitmapOld);
     DeleteObject(g_memBitmap);
     DeleteDC(g_hdc);
