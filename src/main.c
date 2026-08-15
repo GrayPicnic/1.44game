@@ -79,6 +79,13 @@ static const float BUBBLE_PHASE_DUR[8] = {
     BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME, BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME,
     BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME, BUBBLE_DIGIT_TIME, BUBBLE_PAUSE_TIME
 };
+/* 4단계(장약)는 콜아웃 사이 끊기는(공백) 시간을 3배로 늘려서 여유있게 들리게 함 */
+#define BUBBLE_GAP_TIME_CHARGE (BUBBLE_GAP_TIME * 3.0f)
+#define BUBBLE_PAUSE_TIME_CHARGE (BUBBLE_PAUSE_TIME * 3.0f)
+static const float BUBBLE_PHASE_DUR_CHARGE[8] = {
+    BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME_CHARGE, BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME_CHARGE,
+    BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME_CHARGE, BUBBLE_DIGIT_TIME, BUBBLE_PAUSE_TIME_CHARGE
+};
 
 /* 각 스테이지 진입 직후 딱 한 번, 말풍선이 핑크 배경째로 빠르게 3번 깜빡이는 "치직" 연출.
    이 연출이 끝난 뒤에야 위 BUBBLE_PHASE_DUR 자릿수 콜아웃이 시작된다. */
@@ -102,17 +109,23 @@ static const float BUBBLE_PHASE_DUR[8] = {
 /* ---------- 4단계: 장약 고르기 ---------- */
 /* 번호(1~5)가 적힌 원반 20개가 무더기로 쌓여있다. 드래그로 하나씩 치워가며(z 순서가
    집을 때마다 맨 위로 올라감) 무전으로 지정된 번호를 찾아, 화살표가 위아래로 움직이는
-   통에 끌어다 넣으면 완료. 엉뚱한 번호를 넣어도 페널티는 없음 -- 순수 탐색 퍼즐. */
+   통에 끌어다 넣으면 완료. 정답은 "정확히 하나"가 아니라 "통 안 원반들의 합"으로
+   판정한다 -- 예를 들어 7이 목표면 7 하나를 넣어도, 3+4를 넣어도, 1을 7개 넣어도 됨.
+   엉뚱한 조합을 넣어도 페널티는 없음(그냥 안 끝날 뿐) -- 순수 탐색+합산 퍼즐. */
 #define CHARGE_COUNT 20
 #define CHARGE_RADIUS 17
-#define CHARGE_PILE_CX 420
+#define CHARGE_PILE_CX 390
 #define CHARGE_PILE_CY 195
-#define CHARGE_PILE_SPREAD_X 150
-#define CHARGE_PILE_SPREAD_Y 90
+#define CHARGE_PILE_SPREAD_X 70
+#define CHARGE_PILE_SPREAD_Y 65
 #define CHARGE_BIN_X 560
 #define CHARGE_BIN_Y 110
 #define CHARGE_BIN_W 60
 #define CHARGE_BIN_H 170
+#define CHARGE_BUBBLE_X 20   /* 장약 콜아웃은 문장이라 기본 말풍선(30,110폭)보다 넓게 필요 */
+#define CHARGE_BUBBLE_Y 130
+#define CHARGE_BUBBLE_W 240
+#define CHARGE_BUBBLE_H 100
 
 typedef enum { FIRESTAGE_AZIMUTH, FIRESTAGE_ELEVATION, FIRESTAGE_FIRE, FIRESTAGE_CHARGE } FireStage;
 typedef enum { TRANS_NONE, TRANS_OUT, TRANS_IN } TransState;
@@ -547,7 +560,8 @@ static void UpdateGameplay(float dt) {
             }
         } else {
             bubbleTimer += dt;
-            if (bubbleTimer >= BUBBLE_PHASE_DUR[bubblePhase]) {
+            const float *phaseDur = (fireStage == FIRESTAGE_CHARGE) ? BUBBLE_PHASE_DUR_CHARGE : BUBBLE_PHASE_DUR;
+            if (bubbleTimer >= phaseDur[bubblePhase]) {
                 bubbleTimer = 0.0f;
                 bubblePhase = (bubblePhase + 1) % 8;
             }
@@ -673,13 +687,21 @@ static void UpdateGameplay(float dt) {
                 chargeX[chargeDragIdx] = (float)mouseX;
                 chargeY[chargeDragIdx] = (float)mouseY;
             } else {
-                BOOL overBin = (mouseX >= CHARGE_BIN_X && mouseX <= CHARGE_BIN_X + CHARGE_BIN_W &&
-                                 mouseY >= CHARGE_BIN_Y && mouseY <= CHARGE_BIN_Y + CHARGE_BIN_H);
-                if (overBin && chargeNumber[chargeDragIdx] == chargeTargetNumber) {
+                chargeDragIdx = -1;
+                /* 정답은 "정확히 하나"가 아니라 통 안에 있는 원반들의 합 -- 3+4도, 1을 7개도 됨.
+                   그래서 특정 원반이 아니라 매번 놓을 때마다 통 안 전체를 다시 합산해서 검사.
+                   (통에서 다시 꺼내면 자동으로 빠짐 -- 별도의 "제출됨" 상태가 없어도 됨) */
+                int sum = 0;
+                for (int i = 0; i < CHARGE_COUNT; i++) {
+                    if (chargeX[i] >= CHARGE_BIN_X && chargeX[i] <= CHARGE_BIN_X + CHARGE_BIN_W &&
+                        chargeY[i] >= CHARGE_BIN_Y && chargeY[i] <= CHARGE_BIN_Y + CHARGE_BIN_H) {
+                        sum += chargeNumber[i];
+                    }
+                }
+                if (sum == chargeTargetNumber) {
                     transState = TRANS_OUT;
                     transTimer = 0.0f;
                 }
-                chargeDragIdx = -1;
             }
         }
         return;
@@ -799,20 +821,28 @@ static void RenderGameplay(void) {
     } else {
         ClearScreen(0xFF161B12); /* bg placeholder */
 
-        /* 좌측 숫자 말풍선 -- 방위각/사각/장약 스테이지에서만. 3단계(사격)에는 없음 */
+        /* 좌측 숫자 말풍선 -- 방위각/사각/장약 스테이지에서만. 3단계(사격)에는 없음.
+           장약은 문장이라("장약 N 키로!!") 다른 스테이지의 밀 콜아웃 박스보다 넓게 씀 */
+        BOOL isCharge = (fireStage == FIRESTAGE_CHARGE);
+        int bubbleX = isCharge ? CHARGE_BUBBLE_X : 30;
+        int bubbleY = isCharge ? CHARGE_BUBBLE_Y : 130;
+        int bubbleW = isCharge ? CHARGE_BUBBLE_W : 110;
+        int bubbleH = isCharge ? CHARGE_BUBBLE_H : 100;
         if (fireStage != FIRESTAGE_FIRE) {
             if (bubbleIntroActive) {
                 BOOL flashOn = (bubbleIntroPhase % 2 == 0);
                 if (flashOn) {
-                    FillPixelRect(30, 130, 110, 100, 0xFF6A2540);
-                    DrawRectOutline(30, 130, 110, 100, 0xFFEEEEEE);
+                    FillPixelRect(bubbleX, bubbleY, bubbleW, bubbleH, 0xFF6A2540);
+                    DrawRectOutline(bubbleX, bubbleY, bubbleW, bubbleH, 0xFFEEEEEE);
                 }
             } else if (bubblePhase % 2 == 0) {
-                FillPixelRect(30, 130, 110, 100, 0xFF6A2540);
-                DrawRectOutline(30, 130, 110, 100, 0xFFEEEEEE);
-                if (fireStage == FIRESTAGE_CHARGE) {
-                    /* 장약 번호는 한 자리라 계속 같은 자리에만 표시(4자리 순차 콜아웃 불필요) */
-                    DrawNumber(30 + 40, 130 + 40, chargeTargetNumber, 1, 0xFFFFFFFF);
+                FillPixelRect(bubbleX, bubbleY, bubbleW, bubbleH, 0xFF6A2540);
+                DrawRectOutline(bubbleX, bubbleY, bubbleW, bubbleH, 0xFFEEEEEE);
+                if (isCharge) {
+                    /* 문장 전체를 계속 같은 자리에 표시(자릿수 순차 콜아웃 불필요) */
+                    char chargeCallU8[32];
+                    wsprintfA(chargeCallU8, "장약 %d 키로!!", chargeTargetNumber);
+                    QueueTextCentered(bubbleX, bubbleY, bubbleW, bubbleH, 1, 0xFFFFFFFF, Kor(chargeCallU8));
                 } else {
                     int bubbleTarget = (fireStage == FIRESTAGE_AZIMUTH) ? azTargetMil : elTargetMil;
                     int digits[4] = {
@@ -901,6 +931,7 @@ static void RenderGameplay(void) {
             DrawArrowDown(CHARGE_BIN_X + CHARGE_BIN_W / 2, CHARGE_BIN_Y - 6 + (int)binBounce, 7, 0xFFFFD020);
 
             /* z 순서(작은 값부터)로 그려서 나중 그려지는(z가 큰) 원반이 위로 보이게 */
+            int binSum = 0;
             for (int z = 0; z < chargeNextZ; z++) {
                 for (int i = 0; i < CHARGE_COUNT; i++) {
                     if (chargeZ[i] != z) continue;
@@ -908,8 +939,17 @@ static void RenderGameplay(void) {
                     FillCircle((int)chargeX[i], (int)chargeY[i], CHARGE_RADIUS, col);
                     DrawRing((int)chargeX[i], (int)chargeY[i], (float)CHARGE_RADIUS, 0xFF6B5615);
                     DrawNumber((int)chargeX[i] - 4, (int)chargeY[i] - 9, chargeNumber[i], 1, 0xFF2A2200);
+                    if (chargeX[i] >= CHARGE_BIN_X && chargeX[i] <= CHARGE_BIN_X + CHARGE_BIN_W &&
+                        chargeY[i] >= CHARGE_BIN_Y && chargeY[i] <= CHARGE_BIN_Y + CHARGE_BIN_H) {
+                        binSum += chargeNumber[i];
+                    }
                 }
             }
+            /* 통 안 원반들의 현재 합계 -- 몇 개를 넣었는지, 얼마나 더 필요한지 감으로 알 수 있게 */
+            char binSumU8[16];
+            wsprintfA(binSumU8, "합 %d", binSum);
+            QueueTextCentered(CHARGE_BIN_X - 20, CHARGE_BIN_Y + CHARGE_BIN_H + 6, CHARGE_BIN_W + 40, 16,
+                               0, 0xFFAAAAAA, Kor(binSumU8));
         }
 
         /* 하단 단축키 안내 */
@@ -920,7 +960,7 @@ static void RenderGameplay(void) {
         } else if (fireStage == FIRESTAGE_FIRE) {
             QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("표시와 겹칠 때 스페이스로 발사"));
         } else {
-            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("드래그로 치우고 번호를 찾아 통에 넣으시오"));
+            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("드래그로 치우고 합이 맞게 통에 넣으시오"));
         }
         QueueTextPoint(GAME_W - 130, GAME_H - 20, 0, 0xFFAAAAAA, Kor("ESC: 나가기"));
     }
