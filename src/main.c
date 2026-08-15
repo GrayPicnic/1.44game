@@ -12,6 +12,8 @@
 #include <mmsystem.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #include <math.h>
 
 #define GAME_W 640
@@ -42,6 +44,9 @@ static int langIndex = 0; /* 0=한국어 1=영어 2=일본어 -- 지금은 한�
 static const char *LANG_NAMES[3] = { "한국어", "영어", "일본어" };
 
 static float introTimer = 0.0f;
+
+static uint32_t lobbyBgPixels[GAME_W * GAME_H];
+static BOOL lobbyBgLoaded = FALSE;
 
 /* ---------- 포병 밀(Mil) 단위 사격제원 ---------- */
 /* 원 한 바퀴 = 6400밀. 방위각은 여러 바퀴 돌려서 맞추고, 사각은 -44~1244밀 범위의
@@ -259,6 +264,73 @@ static void FillCircle(int cx, int cy, int radius, uint32_t color) {
     }
 }
 
+/* ---------- BMP 로더 (배경 아트용) ----------
+   외부 이미지 파일(images/*.bmp)을 읽어 GAME_W x GAME_H 픽셀 배열로 채운다.
+   8비트 인덱스(팔레트) 또는 24비트 무압축(BI_RGB) BMP만 지원 -- 포토샵에서
+   바로 뽑을 수 있는 형식이라 별도 변환 없이 씀. 리사이즈는 안 하므로 원본이
+   정확히 GAME_W x GAME_H(640x360)이어야 함. 실행파일 옆 images 폴더에서 찾는다. */
+
+static void GetAssetPath(char *outPath, size_t cap, const char *relPath) {
+    char exeDir[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exeDir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) { exeDir[0] = '\0'; }
+    char *lastSlash = strrchr(exeDir, '\\');
+    if (lastSlash) *(lastSlash + 1) = '\0'; else exeDir[0] = '\0';
+    wsprintfA(outPath, "%s%s", exeDir, relPath);
+    (void)cap;
+}
+
+static BOOL LoadBmpInto(const char *path, uint32_t *outPixels, int expectW, int expectH) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return FALSE;
+
+    BITMAPFILEHEADER fh;
+    BITMAPINFOHEADER ih;
+    BOOL ok = fread(&fh, sizeof(fh), 1, f) == 1 && fh.bfType == 0x4D42 &&
+              fread(&ih, sizeof(ih), 1, f) == 1 &&
+              ih.biWidth == expectW && (ih.biHeight == expectH || ih.biHeight == -expectH) &&
+              ih.biCompression == BI_RGB &&
+              (ih.biBitCount == 8 || ih.biBitCount == 24);
+    if (!ok) { fclose(f); return FALSE; }
+
+    BOOL topDown = (ih.biHeight < 0);
+    int bpp = ih.biBitCount;
+
+    static uint32_t palette[256];
+    if (bpp == 8) {
+        int numColors = ih.biClrUsed ? (int)ih.biClrUsed : 256;
+        if (numColors > 256) numColors = 256;
+        fseek(f, (long)(sizeof(fh) + ih.biSize), SEEK_SET);
+        for (int i = 0; i < numColors; i++) {
+            unsigned char bgra[4];
+            if (fread(bgra, 4, 1, f) != 1) { fclose(f); return FALSE; }
+            palette[i] = 0xFF000000 | ((uint32_t)bgra[2] << 16) | ((uint32_t)bgra[1] << 8) | bgra[0];
+        }
+    }
+
+    int rowStride = ((expectW * bpp / 8) + 3) & ~3;
+    static unsigned char rowBuf[GAME_W * 3 + 4]; /* 24bpp 기준 최대 행 크기면 충분 */
+    if (rowStride > (int)sizeof(rowBuf)) { fclose(f); return FALSE; }
+
+    fseek(f, (long)fh.bfOffBits, SEEK_SET);
+    for (int rowIdx = 0; rowIdx < expectH; rowIdx++) {
+        if (fread(rowBuf, (size_t)rowStride, 1, f) != 1) { fclose(f); return FALSE; }
+        int y = topDown ? rowIdx : (expectH - 1 - rowIdx);
+        for (int x = 0; x < expectW; x++) {
+            uint32_t px;
+            if (bpp == 8) {
+                px = palette[rowBuf[x]];
+            } else {
+                unsigned char b = rowBuf[x * 3 + 0], g = rowBuf[x * 3 + 1], r = rowBuf[x * 3 + 2];
+                px = 0xFF000000 | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+            }
+            outPixels[y * expectW + x] = px;
+        }
+    }
+    fclose(f);
+    return TRUE;
+}
+
 /* ---------- 한글 텍스트 (프레임버퍼 위에 GDI로 후처리 렌더링) ----------
    프레임버퍼는 순수 픽셀 배열이라 여기 직접 한글을 그릴 방법이 없다. 대신 이번 프레임에
    그릴 텍스트를 큐에 모아뒀다가, StretchDIBits로 프레임버퍼를 그린 "바로 다음"에 같은
@@ -402,10 +474,15 @@ static BOOL ButtonClicked(Button *b) {
 /* ---------- 씬: 로비 ---------- */
 
 static void RenderLobby(void) {
-    ClearScreen(0xFF1B3A3A); /* bg placeholder */
-
-    FillPixelRect(170, 40, 300, 90, 0xFF6B3FA0); /* title image placeholder */
-    DrawRectOutline(170, 40, 300, 90, 0xFFEEEEEE);
+    if (lobbyBgLoaded) {
+        memcpy(framebuffer, lobbyBgPixels, sizeof(framebuffer));
+        /* 사진 배경 위라 제목 글자가 묻히지 않게 반투명 검정 배경을 살짝 깔아줌 */
+        FillPixelRectAlpha(170, 40, 300, 90, 0x000000, 0.45f);
+    } else {
+        ClearScreen(0xFF1B3A3A); /* bg placeholder */
+        FillPixelRect(170, 40, 300, 90, 0xFF6B3FA0); /* title image placeholder */
+        DrawRectOutline(170, 40, 300, 90, 0xFFEEEEEE);
+    }
     if (!inputBlocked) QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, Kor("게임 타이틀"));
 
     Button startBtn = { 220, 170, 200, 44, 0xFF2E8B57, Kor("시작") };
@@ -1091,6 +1168,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
        실행파일 크기엔 영향 없음(가져오는 함수 몇 개 추가되는 수준). */
     timeBeginPeriod(1);
     InitAudio();
+
+    char lobbyBgPath[MAX_PATH];
+    GetAssetPath(lobbyBgPath, MAX_PATH, "images\\Lobby.bmp");
+    lobbyBgLoaded = LoadBmpInto(lobbyBgPath, lobbyBgPixels, GAME_W, GAME_H);
 
     WNDCLASSA wc = {0};
     wc.lpfnWndProc = WndProc;

@@ -15,6 +15,10 @@ K9 자주포 수동 사격 절차를 모티브로 한 밀(Mil) 단위 방열 게
 ## 구조
 
 - `src/main.c` — 순수 Win32 API + GDI 소프트웨어 렌더링 기반 게임 전체 (외부 런타임 의존성 없음)
+- `images/` — 배경 아트 원본(BMP, 8비트 인덱스 또는 24비트). `build.sh`가
+  `dist/images/`로 같이 복사하고, 실행 시 exe 옆 `images/`에서 읽음.
+  640x360(`GAME_W x GAME_H`) 크기가 아니면 로드가 실패하고 기존 단색
+  placeholder로 자동 폴백함.
 - `build.sh` — mingw-w64로 Windows용 실행파일을 크기 최적화 빌드
 - `check_size.sh` — 빌드 결과물이 1.44MB 제한 내에 있는지 검사
 

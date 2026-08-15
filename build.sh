@@ -16,5 +16,12 @@ mkdir -p dist
     src/main.c \
     -lgdi32 -luser32 -lkernel32 -lm -lwinmm
 
+# 배포 패키지에 아트 에셋도 같이 담는다 (exe 옆 images/ 폴더에서 런타임에 읽음)
+if [ -d images ]; then
+    mkdir -p dist/images
+    cp -f images/*.bmp dist/images/ 2>/dev/null || true
+fi
+
 echo "빌드 완료: $OUT"
 ls -lh "$OUT"
+du -sh dist
