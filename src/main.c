@@ -56,7 +56,7 @@ static float introTimer = 0.0f;
 #define EL_ADJUST_MIN 0.0f
 #define EL_ADJUST_MAX 1244.0f
 #define EL_FINE_STEP_MIL 1.0f
-#define EL_DRAG_MIL_PER_PX 1.0f     /* 예전엔 4밀/px라 살짝만 끌어도 확 튀었음 -- 1:1로 완화 */
+#define EL_DRAG_MIL_PER_PX 0.5f     /* 릴 드래그 민감도. 4 -> 1 -> 0.5로 계속 완화(여전히 살짝만 끌어도 많이 움직인다는 피드백) */
 #define EL_TICK_STEP 1              /* 1밀 단위로 하나하나 보이게 */
 #define EL_PX_PER_MIL 24.0f         /* 눈금이 1밀 간격이라 라벨 안 겹치게 픽셀 간격을 넉넉히 */
 #define EL_FRICTION 4.0f            /* 클수록 관성이 빨리 멈춤 */
@@ -206,6 +206,12 @@ static void DrawArrowRight(int tipX, int tipY, int size, uint32_t color) {
         FillPixelRect(tipX - size + i, tipY - rowH / 2, 1, rowH, color);
     }
 }
+static void DrawArrowDown(int tipX, int tipY, int size, uint32_t color) {
+    for (int i = 0; i < size; i++) {
+        int rowW = (size - i) * 2;
+        FillPixelRect(tipX - rowW / 2, tipY - size + i, rowW, 1, color);
+    }
+}
 
 /* ---------- 한글 텍스트 (프레임버퍼 위에 GDI로 후처리 렌더링) ----------
    프레임버퍼는 순수 픽셀 배열이라 여기 직접 한글을 그릴 방법이 없다. 대신 이번 프레임에
@@ -341,7 +347,9 @@ static BOOL ButtonClicked(Button *b) {
     }
     FillPixelRect(b->x, b->y, b->w, b->h, c);
     DrawRectOutline(b->x, b->y, b->w, b->h, 0xFFEEEEEE);
-    QueueTextCentered(b->x, b->y, b->w, b->h, 1, 0xFFFFFFFF, b->label);
+    /* 텍스트는 픽셀과 별도 레이어라 딤 처리로는 안 가려짐 -- 차단된 상태면 아예 큐에 안 넣는다
+       (안 그러면 옵션 팝업 위로 뒤쪽 로비 버튼 글자가 그대로 비쳐 보임) */
+    if (!inputBlocked) QueueTextCentered(b->x, b->y, b->w, b->h, 1, 0xFFFFFFFF, b->label);
     return hover && mouseDown && !mouseDownPrev;
 }
 
@@ -352,7 +360,7 @@ static void RenderLobby(void) {
 
     FillPixelRect(170, 40, 300, 90, 0xFF6B3FA0); /* title image placeholder */
     DrawRectOutline(170, 40, 300, 90, 0xFFEEEEEE);
-    QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, Kor("게임 타이틀"));
+    if (!inputBlocked) QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, Kor("게임 타이틀"));
 
     Button startBtn = { 220, 170, 200, 44, 0xFF2E8B57, Kor("시작") };
     Button optBtn   = { 220, 226, 200, 44, 0xFF3060B0, Kor("옵션") };
@@ -397,7 +405,9 @@ static void RenderIntro(void) {
     QueueTextPoint(60, 274, 0, 0xFFFFE0B0, Kor("마지막 명령을 수행하길 바란다."));
     QueueTextPoint(60, 300, 0, 0xFFFFE0B0, Kor("지금부터 사격재원을 불러주겠다."));
 
-    QueueTextPoint(GAME_W - 150, GAME_H - 20, 0, 0xFFAAAAAA, Kor("ESC: 건너뛰기"));
+    /* 클릭/스페이스로 계속하라는 뜻으로 말풍선 우측 하단에서 위아래로 왔다갔다하는 화살표 */
+    float bounce = sinf(introTimer * 5.0f) * 4.0f;
+    DrawArrowDown(GAME_W - 60, 310 + (int)bounce, 7, 0xFFFFE0B0);
 
     cursorHot = TRUE; /* 인트로는 화면 아무데나 클릭해도 스킵되므로 전체가 클릭 가능 지점 */
 
@@ -446,7 +456,6 @@ static void EnterGameplay(void) {
 
 static void UpdateIntro(float dt) {
     (void)dt;
-    if (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE]) { EnterGameplay(); return; }
     if ((keys[VK_SPACE] && !keysPrev[VK_SPACE]) || (mouseDown && !mouseDownPrev)) { EnterGameplay(); return; }
 }
 
@@ -724,9 +733,11 @@ static void RenderGameplay(void) {
         FillPixelRect(barX + 2, barY + 2, fillW, barH - 4, gaugeColor);
         DrawNumber(barX + barW + 12, barY - 2, (int)(timeLeft + 0.99f), 2, lowTime ? 0xFFFF4433 : 0xFF3CFF6E);
 
-        /* 중앙 숫자판 */
-        FillPixelRect(230, 140, 160, 100, 0xFF1E2A4A);
-        DrawRectOutline(230, 140, 160, 100, 0xFFEEEEEE);
+        /* 중앙 숫자판 -- 3단계(사격)에는 숫자판 대신 그 자리에 초록 사각 오브젝트가 있음(아래) */
+        if (fireStage != FIRESTAGE_FIRE) {
+            FillPixelRect(230, 140, 160, 100, 0xFF1E2A4A);
+            DrawRectOutline(230, 140, 160, 100, 0xFFEEEEEE);
+        }
         if (fireStage == FIRESTAGE_AZIMUTH) {
             QueueTextCentered(230, 146, 160, 16, 0, 0xFF88AACC, Kor("방위각 (밀)"));
             int curMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
@@ -734,10 +745,6 @@ static void RenderGameplay(void) {
         } else if (fireStage == FIRESTAGE_ELEVATION) {
             QueueTextCentered(230, 146, 160, 16, 0, 0xFF88AACC, Kor("사각 (밀)"));
             DrawNumber(255, 190, (int)(elCurrentMil + 0.5f), 4, 0xFF3CFF6E);
-        } else {
-            QueueTextCentered(230, 146, 160, 16, 0, 0xFF88AACC, Kor("명중 횟수"));
-            DrawNumber(275, 190, fireHits, 1, 0xFF3CFF6E);
-            QueueTextPoint(300, 195, 0, 0xFF88AACC, Kor("/ 5"));
         }
 
         /* 우측 조작부 -- 방위각: 회전 다이얼 / 사각: 세로 릴 / 사격: 타이밍 게이지 */
@@ -775,8 +782,11 @@ static void RenderGameplay(void) {
             DrawRectOutline((int)fireSquareX, FIRE_SQUARE_Y, FIRE_SQUARE_SIZE, FIRE_SQUARE_SIZE, 0xFFEEEEEE);
 
             DrawRectOutline(FIRE_GAUGE_X, FIRE_GAUGE_Y, FIRE_GAUGE_W, FIRE_GAUGE_H, 0xFFAAAAAA);
+            /* 붉은 표시 폭 = 실제 명중 판정 허용폭(FIRE_MARK_TOLERANCE_PX)의 2배 -- 눈에 보이는
+               빨간 구간이 곧 정확한 히트 존이 되도록, 그리고 불릿보다 확실히 길게 */
             int markX = FIRE_GAUGE_X + (int)(fireMarkPos * (float)FIRE_GAUGE_W);
-            FillPixelRect(markX - 2, FIRE_GAUGE_Y, 4, FIRE_GAUGE_H, 0xFFFF3030);
+            int markHalfW = (int)FIRE_MARK_TOLERANCE_PX;
+            FillPixelRect(markX - markHalfW, FIRE_GAUGE_Y, markHalfW * 2, FIRE_GAUGE_H, 0xFFFF3030);
             int bulletX = FIRE_GAUGE_X + (int)(fireBulletPos * (float)FIRE_GAUGE_W);
             FillPixelRect(bulletX - 3, FIRE_GAUGE_Y - 8, 6, FIRE_GAUGE_H + 16,
                           (leverFlash > 0.0f) ? 0xFFFFB020 : 0xFFFFD020);
