@@ -51,7 +51,7 @@ static BOOL lobbyBgLoaded = FALSE;
 #define LOGO_MAX_W 400
 #define LOGO_MAX_H 100
 #define LOGO_X 15
-#define LOGO_Y 8
+#define LOGO_Y 18
 #define LOGO_CHROMA_KEY 0xFFFF00FF  /* 로고 배경의 마젠타를 투명 처리 */
 #define LOGO_ANIM_TIME 0.45f        /* 로비 진입 시 페이드인 + 살짝 아래에서 올라오는 시간 */
 #define LOGO_RISE_PX 4.0f
@@ -515,6 +515,8 @@ static void PlayStaticNoise(void) {
 
 /* ---------- 조작 틱/명중 사운드: 레버·릴 드래그 중 "띠리릭" 틱음 + 3단계 명중음 ----------
    둘 다 짧고 자주 재생될 수 있어서 SFX/BGM/War와는 또 다른 전용 waveOut 핸들을 씀. */
+#define TICK_MIL_STEP 10   /* 1밀마다 재생하면 빠르게 돌릴 때 재트리거가 너무 잦아서 음이 겹쳐
+                               높아지는 것처럼 들림 -- 10밀마다 한 번으로 완화 */
 #define TICK_SAMPLE_RATE 8000
 #define TICK_SAMPLES (TICK_SAMPLE_RATE * 25 / 1000)  /* 25ms 짧은 클릭 */
 #define HIT_SAMPLES (TICK_SAMPLE_RATE * 12 / 100)    /* 120ms 상승 차임 */
@@ -1293,7 +1295,7 @@ static void UpdateGameplay(float dt) {
         if (mouseDown && !mouseDownPrev && distToPivot <= leverPivotGrabR) {
             draggingLever = TRUE;
             lastDragAngle = atan2f((float)dy, (float)dx) * 180.0f / PI_F;
-            azLastTickMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
+            azLastTickMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG) / TICK_MIL_STEP;
         }
         if (!mouseDown) draggingLever = FALSE;
         if (draggingLever) {
@@ -1303,8 +1305,8 @@ static void UpdateGameplay(float dt) {
             while (delta < -180.0f) delta += 360.0f;
             azAngleDeg += delta;
             lastDragAngle = curAngle;
-            /* 1밀 단위로 넘어갈 때마다 짧게 딸깍 -- 빠르게 돌리면 "띠리릭" 연속음처럼 들림 */
-            int curTickMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
+            /* 10밀 단위로 넘어갈 때마다 짧게 딸깍 -- 빠르게 돌리면 "띠리릭" 연속음처럼 들림 */
+            int curTickMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG) / TICK_MIL_STEP;
             if (curTickMil != azLastTickMil) {
                 PlayTick();
                 azLastTickMil = curTickMil;
@@ -1342,7 +1344,7 @@ static void UpdateGameplay(float dt) {
             draggingLever = TRUE;
             lastDragMouseY = mouseY;
             elVelocity = 0.0f;
-            elLastTickMil = (int)(elCurrentMil + 0.5f);
+            elLastTickMil = (int)(elCurrentMil + 0.5f) / TICK_MIL_STEP;
         }
         if (draggingLever && !mouseDown) draggingLever = FALSE;
 
@@ -1355,7 +1357,7 @@ static void UpdateGameplay(float dt) {
             if (dt > 0.0001f) elVelocity = elVelocity * 0.7f + (deltaMil / dt) * 0.3f;
             if (elCurrentMil < EL_ADJUST_MIN) { elCurrentMil = EL_ADJUST_MIN; elVelocity = 0.0f; }
             if (elCurrentMil > EL_ADJUST_MAX) { elCurrentMil = EL_ADJUST_MAX; elVelocity = 0.0f; }
-            int curTickMil = (int)(elCurrentMil + 0.5f);
+            int curTickMil = (int)(elCurrentMil + 0.5f) / TICK_MIL_STEP;
             if (curTickMil != elLastTickMil) {
                 PlayTick();
                 elLastTickMil = curTickMil;
@@ -1368,7 +1370,7 @@ static void UpdateGameplay(float dt) {
             elVelocity *= decay;
             if (elCurrentMil < EL_ADJUST_MIN) { elCurrentMil = EL_ADJUST_MIN; elVelocity = 0.0f; }
             if (elCurrentMil > EL_ADJUST_MAX) { elCurrentMil = EL_ADJUST_MAX; elVelocity = 0.0f; }
-            int curTickMil = (int)(elCurrentMil + 0.5f);
+            int curTickMil = (int)(elCurrentMil + 0.5f) / TICK_MIL_STEP;
             if (curTickMil != elLastTickMil) {
                 PlayTick();
                 elLastTickMil = curTickMil;
