@@ -48,6 +48,19 @@ static float introTimer = 0.0f;
 static uint32_t lobbyBgPixels[GAME_W * GAME_H];
 static BOOL lobbyBgLoaded = FALSE;
 
+#define LOGO_MAX_W 400
+#define LOGO_MAX_H 100
+#define LOGO_X 15
+#define LOGO_Y 8
+#define LOGO_CHROMA_KEY 0xFFFF00FF  /* 로고 배경의 마젠타를 투명 처리 */
+#define LOGO_ANIM_TIME 0.45f        /* 로비 진입 시 페이드인 + 살짝 아래에서 올라오는 시간 */
+#define LOGO_RISE_PX 4.0f
+static uint32_t logoPixels[LOGO_MAX_W * LOGO_MAX_H];
+static BOOL logoLoaded = FALSE;
+static int logoW = 0, logoH = 0;
+static BOOL lobbyWasActive = FALSE;  /* 방금 로비(또는 옵션)에 막 들어왔는지 감지용 */
+static float lobbyLogoTimer = 0.0f;
+
 /* ---------- 포병 밀(Mil) 단위 사격제원 ---------- */
 /* 원 한 바퀴 = 6400밀. 방위각은 여러 바퀴 돌려서 맞추고, 사각은 -44~1244밀 범위의
    세로 릴로 맞춘다 (음수 구간은 이번 프로토타입에서 스킵 -- 실사용 범위 300~1100 위주). */
@@ -292,18 +305,29 @@ static void GetAssetPath(char *outPath, size_t cap, const char *relPath) {
     (void)cap;
 }
 
-static BOOL LoadBmpInto(const char *path, uint32_t *outPixels, int expectW, int expectH) {
+/* expectW/expectH > 0 이면 그 크기와 정확히 일치해야 함(배경용). expectW==0이면 파일에
+   적힌 크기를 그대로 쓰되 maxW/maxH를 넘으면 실패(스프라이트용 -- 버퍼 오버플로 방지).
+   실제 로드된 크기는 outW/outH로 돌려줌(둘 다 NULL 가능). 8/16/24bpp 무압축(BI_RGB) 지원 --
+   16bpp는 비트마스크 없는 기본 포맷인 X1R5G5B5로 해석함(포토샵 "16 Bit" 내보내기가 이 형식). */
+static BOOL LoadBmpInto(const char *path, uint32_t *outPixels, int expectW, int expectH,
+                         int maxW, int maxH, int *outW, int *outH) {
     FILE *f = fopen(path, "rb");
     if (!f) return FALSE;
 
     BITMAPFILEHEADER fh;
     BITMAPINFOHEADER ih;
-    BOOL ok = fread(&fh, sizeof(fh), 1, f) == 1 && fh.bfType == 0x4D42 &&
-              fread(&ih, sizeof(ih), 1, f) == 1 &&
-              ih.biWidth == expectW && (ih.biHeight == expectH || ih.biHeight == -expectH) &&
-              ih.biCompression == BI_RGB &&
-              (ih.biBitCount == 8 || ih.biBitCount == 24);
-    if (!ok) { fclose(f); return FALSE; }
+    BOOL headerOk = fread(&fh, sizeof(fh), 1, f) == 1 && fh.bfType == 0x4D42 &&
+                     fread(&ih, sizeof(ih), 1, f) == 1 &&
+                     ih.biCompression == BI_RGB &&
+                     (ih.biBitCount == 8 || ih.biBitCount == 16 || ih.biBitCount == 24);
+    if (!headerOk) { fclose(f); return FALSE; }
+
+    int w = ih.biWidth;
+    int h = (ih.biHeight < 0) ? -ih.biHeight : ih.biHeight;
+    if (expectW > 0 && (w != expectW || h != expectH)) { fclose(f); return FALSE; }
+    if (maxW > 0 && (w > maxW || h > maxH)) { fclose(f); return FALSE; }
+    if (outW) *outW = w;
+    if (outH) *outH = h;
 
     BOOL topDown = (ih.biHeight < 0);
     int bpp = ih.biBitCount;
@@ -320,27 +344,58 @@ static BOOL LoadBmpInto(const char *path, uint32_t *outPixels, int expectW, int 
         }
     }
 
-    int rowStride = ((expectW * bpp / 8) + 3) & ~3;
-    static unsigned char rowBuf[GAME_W * 3 + 4]; /* 24bpp 기준 최대 행 크기면 충분 */
+    int rowStride = ((w * bpp / 8) + 3) & ~3;
+    static unsigned char rowBuf[GAME_W * 3 + 4]; /* 24bpp 640폭 기준 최대 행 크기면 충분 */
     if (rowStride > (int)sizeof(rowBuf)) { fclose(f); return FALSE; }
 
     fseek(f, (long)fh.bfOffBits, SEEK_SET);
-    for (int rowIdx = 0; rowIdx < expectH; rowIdx++) {
+    for (int rowIdx = 0; rowIdx < h; rowIdx++) {
         if (fread(rowBuf, (size_t)rowStride, 1, f) != 1) { fclose(f); return FALSE; }
-        int y = topDown ? rowIdx : (expectH - 1 - rowIdx);
-        for (int x = 0; x < expectW; x++) {
+        int y = topDown ? rowIdx : (h - 1 - rowIdx);
+        for (int x = 0; x < w; x++) {
             uint32_t px;
             if (bpp == 8) {
                 px = palette[rowBuf[x]];
+            } else if (bpp == 16) {
+                unsigned short p16 = (unsigned short)(rowBuf[x * 2] | (rowBuf[x * 2 + 1] << 8));
+                int r5 = (p16 >> 10) & 0x1F, g5 = (p16 >> 5) & 0x1F, b5 = p16 & 0x1F;
+                int r = (r5 << 3) | (r5 >> 2), g = (g5 << 3) | (g5 >> 2), b = (b5 << 3) | (b5 >> 2);
+                px = 0xFF000000 | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
             } else {
                 unsigned char b = rowBuf[x * 3 + 0], g = rowBuf[x * 3 + 1], r = rowBuf[x * 3 + 2];
                 px = 0xFF000000 | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
             }
-            outPixels[y * expectW + x] = px;
+            outPixels[y * w + x] = px;
         }
     }
     fclose(f);
     return TRUE;
+}
+
+/* 마젠타(등) 키컬러 픽셀은 건너뛰고, 나머지는 alpha 비율로 프레임버퍼와 블렌딩해서 그린다
+   (로고 페이드인 애니메이션용 -- alpha 1.0이면 완전 불투명하게 그대로 그려짐) */
+static void BlitSpriteAlpha(const uint32_t *src, int w, int h, int destX, int destY,
+                             uint32_t keyColor, float alpha) {
+    if (alpha <= 0.0f) return;
+    if (alpha > 1.0f) alpha = 1.0f;
+    uint32_t keyRGB = keyColor & 0x00FFFFFF;
+    for (int y = 0; y < h; y++) {
+        int dy = destY + y;
+        if (dy < 0 || dy >= GAME_H) continue;
+        for (int x = 0; x < w; x++) {
+            uint32_t px = src[y * w + x];
+            if ((px & 0x00FFFFFF) == keyRGB) continue;
+            int dx = destX + x;
+            if (dx < 0 || dx >= GAME_W) continue;
+            uint32_t old = framebuffer[dy * GAME_W + dx];
+            int orr = (int)((old >> 16) & 0xFF), og = (int)((old >> 8) & 0xFF), ob = (int)(old & 0xFF);
+            int sr = (int)((px >> 16) & 0xFF), sg = (int)((px >> 8) & 0xFF), sb = (int)(px & 0xFF);
+            int r = (int)((float)orr * (1.0f - alpha) + (float)sr * alpha);
+            int g = (int)((float)og * (1.0f - alpha) + (float)sg * alpha);
+            int b = (int)((float)ob * (1.0f - alpha) + (float)sb * alpha);
+            framebuffer[dy * GAME_W + dx] = 0xFF000000 | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        }
+    }
 }
 
 /* ---------- 한글 텍스트 (프레임버퍼 위에 GDI로 후처리 렌더링) ----------
@@ -868,14 +923,25 @@ static BOOL ButtonClicked(Button *b) {
 static void RenderLobby(void) {
     if (lobbyBgLoaded) {
         memcpy(framebuffer, lobbyBgPixels, sizeof(framebuffer));
-        /* 사진 배경 위라 제목 글자가 묻히지 않게 반투명 검정 배경을 살짝 깔아줌 */
-        FillPixelRectAlpha(170, 40, 300, 90, 0x000000, 0.45f);
     } else {
         ClearScreen(0xFF1B3A3A); /* bg placeholder */
+    }
+
+    /* 로고: 로비 진입 시 페이드인 + 살짝 아래에서 위로 올라오는 애니메이션 */
+    float logoProgress = lobbyLogoTimer / LOGO_ANIM_TIME;
+    if (logoProgress > 1.0f) logoProgress = 1.0f;
+    if (logoLoaded) {
+        int animY = LOGO_Y + (int)(LOGO_RISE_PX * (1.0f - logoProgress) + 0.5f);
+        BlitSpriteAlpha(logoPixels, logoW, logoH, LOGO_X, animY, LOGO_CHROMA_KEY, logoProgress);
+    } else if (lobbyBgLoaded) {
+        /* 사진 배경 위라 제목 글자가 묻히지 않게 반투명 검정 배경을 살짝 깔아줌 */
+        FillPixelRectAlpha(170, 40, 300, 90, 0x000000, 0.45f);
+        if (!inputBlocked) QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, Kor("게임 타이틀"));
+    } else {
         FillPixelRect(170, 40, 300, 90, 0xFF6B3FA0); /* title image placeholder */
         DrawRectOutline(170, 40, 300, 90, 0xFFEEEEEE);
+        if (!inputBlocked) QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, Kor("게임 타이틀"));
     }
-    if (!inputBlocked) QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, Kor("게임 타이틀"));
 
     /* 옵션 -- 버튼 대신 우상단 톱니바퀴 아이콘 */
     int gearCx = GAME_W - 30, gearCy = 30, gearR = 14;
@@ -1506,6 +1572,17 @@ static void RenderGameplay(void) {
 static void UpdateGame(float dt) {
     cursorHot = FALSE;
     if (scene == SCENE_INTRO) cursorHot = TRUE; /* 인트로는 화면 전체가 스킵 클릭 가능 지점 */
+
+    /* 로고 페이드인 타이머: 로비(또는 옵션)에 막 들어왔을 때만 0부터 다시 재생 */
+    BOOL lobbyIsh = (scene == SCENE_LOBBY || scene == SCENE_OPTIONS);
+    if (lobbyIsh) {
+        if (!lobbyWasActive) lobbyLogoTimer = 0.0f;
+        else lobbyLogoTimer += dt;
+        lobbyWasActive = TRUE;
+    } else {
+        lobbyWasActive = FALSE;
+    }
+
     switch (scene) {
         case SCENE_LOBBY:
             /* 종료 버튼을 없앤 대신 ESC로 게임을 닫음 */
@@ -1612,7 +1689,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
 
     char lobbyBgPath[MAX_PATH];
     GetAssetPath(lobbyBgPath, MAX_PATH, "images\\Lobby.bmp");
-    lobbyBgLoaded = LoadBmpInto(lobbyBgPath, lobbyBgPixels, GAME_W, GAME_H);
+    lobbyBgLoaded = LoadBmpInto(lobbyBgPath, lobbyBgPixels, GAME_W, GAME_H, 0, 0, NULL, NULL);
+
+    char logoPath[MAX_PATH];
+    GetAssetPath(logoPath, MAX_PATH, "images\\Logo.bmp");
+    logoLoaded = LoadBmpInto(logoPath, logoPixels, 0, 0, LOGO_MAX_W, LOGO_MAX_H, &logoW, &logoH);
 
     WNDCLASSA wc = {0};
     wc.lpfnWndProc = WndProc;
