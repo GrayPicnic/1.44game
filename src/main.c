@@ -502,6 +502,15 @@ static void EnterGameplay(void) {
     draggingLever = FALSE;
 }
 
+/* 원반 i가 통 안에 "완전히" 들어와 있는지 -- 중심점이 아니라 원 전체(반지름까지)가
+   통 사각형 안쪽이어야 함. 살짝 걸치기만 해도 합산에서 빠진다. */
+static BOOL ChargeDiskFullyInBin(int i) {
+    return chargeX[i] - CHARGE_RADIUS >= (float)CHARGE_BIN_X &&
+           chargeX[i] + CHARGE_RADIUS <= (float)(CHARGE_BIN_X + CHARGE_BIN_W) &&
+           chargeY[i] - CHARGE_RADIUS >= (float)CHARGE_BIN_Y &&
+           chargeY[i] + CHARGE_RADIUS <= (float)(CHARGE_BIN_Y + CHARGE_BIN_H);
+}
+
 /* 3단계(사격) 통과 후 4단계 진입 시 무더기를 새로 쌓는다. 목표가 10~18이라
    원반 하나(1~5) 값으로는 절대 못 맞추고 항상 여러 개를 더해야 한다. 풀이가
    반드시 존재하도록, 목표를 정확히 채우는 원반 조합을 먼저 만들어서 앞쪽
@@ -707,10 +716,7 @@ static void UpdateGameplay(float dt) {
                    (통에서 다시 꺼내면 자동으로 빠짐 -- 별도의 "제출됨" 상태가 없어도 됨) */
                 int sum = 0;
                 for (int i = 0; i < CHARGE_COUNT; i++) {
-                    if (chargeX[i] >= CHARGE_BIN_X && chargeX[i] <= CHARGE_BIN_X + CHARGE_BIN_W &&
-                        chargeY[i] >= CHARGE_BIN_Y && chargeY[i] <= CHARGE_BIN_Y + CHARGE_BIN_H) {
-                        sum += chargeNumber[i];
-                    }
+                    if (ChargeDiskFullyInBin(i)) sum += chargeNumber[i];
                 }
                 if (sum == chargeTargetNumber) {
                     transState = TRANS_OUT;
@@ -953,10 +959,7 @@ static void RenderGameplay(void) {
                     FillCircle((int)chargeX[i], (int)chargeY[i], CHARGE_RADIUS, col);
                     DrawRing((int)chargeX[i], (int)chargeY[i], (float)CHARGE_RADIUS, 0xFF6B5615);
                     DrawNumber((int)chargeX[i] - 4, (int)chargeY[i] - 9, chargeNumber[i], 1, 0xFF2A2200);
-                    if (chargeX[i] >= CHARGE_BIN_X && chargeX[i] <= CHARGE_BIN_X + CHARGE_BIN_W &&
-                        chargeY[i] >= CHARGE_BIN_Y && chargeY[i] <= CHARGE_BIN_Y + CHARGE_BIN_H) {
-                        binSum += chargeNumber[i];
-                    }
+                    if (ChargeDiskFullyInBin(i)) binSum += chargeNumber[i];
                 }
             }
             /* 통 안 원반들의 현재 합계 -- 몇 개를 넣었는지, 얼마나 더 필요한지 감으로 알 수 있게 */
