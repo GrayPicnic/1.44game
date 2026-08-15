@@ -603,19 +603,127 @@ static void UpdateMusicLoop(void) {
     }
 }
 
-/* ---------- 전쟁 앰비언스: 게임 시작(인트로) 이후 폭발/총성이 무작위로 터지는 효과음 ----------
-   고정 루프 대신, 매 이벤트를 그 자리에서 즉석 합성해서 waveOut 세 번째 핸들(g_waveOutWar)로
-   한 방씩 재생하는 방식(진짜 런타임 랜덤 -- 플레이할 때마다 패턴이 다름). 다음 이벤트까지
-   남은 시간을 랜덤하게 뽑아뒀다가 다 되면 종류/피치/길이를 전부 그때그때 랜덤하게 골라
-   합성함. 미션 성공(RESULT_HIT) 순간 바로 멈춘다. */
+/* ---------- 전쟁 앰비언스: 게임 시작(인트로) 이후 도는 폭발/총성 배경음 ----------
+   런타임 랜덤 트리거 방식은 긴장감이 떨어진다는 피드백을 받고, 미리 정해둔(고정)
+   타임라인을 하나의 긴 루프 버퍼에 겹쳐 그리는 방식으로 되돌림 -- 대신 이번엔 이벤트를
+   훨씬 촘촘하게, 그리고 일부러 서로 겹치게 배치해서(포성 rumble이 깔린 위에 폭발+총성이
+   겹침) 빈 공백 없이 입체감 있게 들리도록 설계함. 미션 성공(RESULT_HIT) 순간 멈춘다. */
 #define WAR_SAMPLE_RATE 8000
-#define WAR_MAX_EVENT_SAMPLES (WAR_SAMPLE_RATE * 2) /* 이벤트 한 번의 최대 길이(2초) */
+#define WAR_LOOP_SECONDS 16
+#define WAR_TOTAL_SAMPLES (WAR_SAMPLE_RATE * WAR_LOOP_SECONDS)
+
+/* 포성 rumble -- 길게 깔리는 초저역. 다른 레이어와 겹쳐도 되게 여유 있게 배치 */
+typedef struct { float startSec; float durationSec; } WarRumble;
+static const WarRumble WAR_RUMBLES[] = { { 0.0f, 4.0f }, { 8.5f, 4.5f } };
+#define WAR_RUMBLE_COUNT (int)(sizeof(WAR_RUMBLES) / sizeof(WAR_RUMBLES[0]))
+
+/* 폭발 -- 낙하 휘파람 + 저음 붐. close면 더 크고 짧게 감쇠 */
+typedef struct { float startSec; BOOL close; } WarExplosion;
+static const WarExplosion WAR_EXPLOSIONS[] = {
+    { 1.0f, FALSE }, { 3.8f, TRUE }, { 6.5f, FALSE }, { 10.0f, TRUE }, { 13.5f, FALSE },
+};
+#define WAR_EXPLOSION_COUNT (int)(sizeof(WAR_EXPLOSIONS) / sizeof(WAR_EXPLOSIONS[0]))
+
+/* 총성 버스트 -- 폭발 직전/도중에 겹치게 배치한 것도 있음(예: 6.2s가 6.5s 폭발과 겹침) */
+typedef struct { float startSec; int shots; float shotGapSec; } WarGunBurst;
+static const WarGunBurst WAR_GUN_BURSTS[] = {
+    { 0.4f, 2, 0.10f }, { 2.2f, 4, 0.08f }, { 3.5f, 1, 0.0f }, { 5.0f, 5, 0.07f },
+    { 6.2f, 3, 0.09f }, { 9.0f, 2, 0.10f }, { 11.0f, 4, 0.08f }, { 12.2f, 1, 0.0f },
+    { 14.5f, 3, 0.09f }, { 15.5f, 2, 0.08f },
+};
+#define WAR_GUN_BURST_COUNT (int)(sizeof(WAR_GUN_BURSTS) / sizeof(WAR_GUN_BURSTS[0]))
 
 static HWAVEOUT g_waveOutWar = NULL;
 static WAVEHDR g_warHdr;
-static unsigned char g_warBuf[WAR_MAX_EVENT_SAMPLES];
+static unsigned char g_warBuf[WAR_TOTAL_SAMPLES];
 static BOOL g_warOutOpen = FALSE;
-static float g_warNextEventIn = 1.0f; /* 다음 이벤트까지 남은 시간(초) */
+static BOOL g_warPlaying = FALSE;
+
+static void GenerateWarLoop(void) {
+    static float mixBuf[WAR_TOTAL_SAMPLES];
+
+    /* 배경 브라운노이즈(바람/원거리 소음) -- 아주 옅게 */
+    float brown = 0.0f;
+    for (int i = 0; i < WAR_TOTAL_SAMPLES; i++) {
+        float whiteN = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
+        brown += whiteN * 0.02f;
+        if (brown > 1.0f) brown = 1.0f;
+        if (brown < -1.0f) brown = -1.0f;
+        mixBuf[i] = brown * 5.0f;
+    }
+
+    /* 포성 rumble -- 초저역, 서서히 커졌다 작아짐 */
+    for (int r = 0; r < WAR_RUMBLE_COUNT; r++) {
+        int base = (int)(WAR_RUMBLES[r].startSec * WAR_SAMPLE_RATE);
+        int len = (int)(WAR_RUMBLES[r].durationSec * WAR_SAMPLE_RATE);
+        float freq = 14.0f + (float)(rand() % 10);
+        for (int j = 0; j < len; j++) {
+            int idx = base + j;
+            if (idx < 0 || idx >= WAR_TOTAL_SAMPLES) continue;
+            float t = (float)j / (float)len;
+            float env = sinf(PI_F * t) * 0.6f;
+            float s = sinf(2.0f * PI_F * freq * (float)j / (float)WAR_SAMPLE_RATE);
+            float n = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
+            mixBuf[idx] += (s * 0.85f + n * 0.15f) * env * 30.0f;
+        }
+    }
+
+    /* 폭발: 낙하 휘파람 + 저음 붐(16~30Hz 위주로 무겁게) */
+    for (int e = 0; e < WAR_EXPLOSION_COUNT; e++) {
+        BOOL close = WAR_EXPLOSIONS[e].close;
+        int base = (int)(WAR_EXPLOSIONS[e].startSec * WAR_SAMPLE_RATE);
+        int whistleLen = (int)(0.30f * WAR_SAMPLE_RATE);
+        float hiFreq = 700.0f + (float)(rand() % 500);
+        for (int j = 0; j < whistleLen; j++) {
+            int idx = base + j;
+            if (idx < 0 || idx >= WAR_TOTAL_SAMPLES) continue;
+            float t = (float)j / (float)whistleLen;
+            float freq = hiFreq - t * (hiFreq - 120.0f);
+            float env = (1.0f - t) * (close ? 0.55f : 0.30f);
+            float s = sinf(2.0f * PI_F * freq * (float)j / (float)WAR_SAMPLE_RATE);
+            mixBuf[idx] += s * env * 10.0f;
+        }
+        int boomStart = base + whistleLen;
+        int boomLen = (int)((close ? 1.4f : 1.0f) * WAR_SAMPLE_RATE);
+        float subFreq = 16.0f + (float)(rand() % 14);
+        for (int j = 0; j < boomLen; j++) {
+            int idx = boomStart + j;
+            if (idx < 0 || idx >= WAR_TOTAL_SAMPLES) continue;
+            float t = (float)j / (float)boomLen;
+            float env = expf(-t * (close ? 2.0f : 3.0f));
+            float lowFreq = subFreq - t * (subFreq * 0.4f);
+            float s = sinf(2.0f * PI_F * lowFreq * (float)j / (float)WAR_SAMPLE_RATE);
+            float n = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
+            float amp = close ? 100.0f : 65.0f;
+            mixBuf[idx] += (s * 0.78f + n * 0.22f) * env * amp;
+        }
+    }
+
+    /* 총성: 자동사격처럼 여러 발 연달아, 저음(55~95Hz) 섞어서 가볍지 않게 */
+    for (int b = 0; b < WAR_GUN_BURST_COUNT; b++) {
+        float shotFreq = 55.0f + (float)(rand() % 40);
+        for (int s = 0; s < WAR_GUN_BURSTS[b].shots; s++) {
+            int base = (int)((WAR_GUN_BURSTS[b].startSec + (float)s * WAR_GUN_BURSTS[b].shotGapSec) * WAR_SAMPLE_RATE);
+            int shotLen = (int)(0.03f * WAR_SAMPLE_RATE);
+            for (int j = 0; j < shotLen; j++) {
+                int idx = base + j;
+                if (idx < 0 || idx >= WAR_TOTAL_SAMPLES) continue;
+                float t = (float)j / (float)shotLen;
+                float env = expf(-t * 14.0f);
+                float n = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
+                float low = sinf(2.0f * PI_F * shotFreq * (float)j / (float)WAR_SAMPLE_RATE);
+                mixBuf[idx] += (n * 0.45f + low * 0.55f) * env * 60.0f;
+            }
+        }
+    }
+
+    for (int i = 0; i < WAR_TOTAL_SAMPLES; i++) {
+        int v = 128 + (int)mixBuf[i];
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        g_warBuf[i] = (unsigned char)v;
+    }
+}
 
 static void InitWar(void) {
     WAVEFORMATEX wfx;
@@ -628,111 +736,30 @@ static void InitWar(void) {
     wfx.nAvgBytesPerSec = WAR_SAMPLE_RATE;
     if (waveOutOpen(&g_waveOutWar, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR) {
         g_warOutOpen = TRUE;
+        GenerateWarLoop();
     }
 }
 
-static float WarRandF(void) { return (float)(rand() % 1000) / 1000.0f; } /* 0.0~1.0 */
-
-/* 이벤트 하나를 즉석 합성해서 재생 -- 5종류 중 랜덤(원거리/근접 폭발, 단발/연발 총성,
-   초저역 포성 rumble), 매번 피치/길이/진폭도 흔들어서 같은 종류라도 다르게 들림.
-   전체적으로 저음 성분(사인) 비중을 노이즈보다 높게 둬서 가볍지 않고 묵직하게. */
-static void PlayWarEvent(void) {
-    if (!soundOn || !g_warOutOpen) return;
-
-    int type = rand() % 5; /* 0=원거리폭발 1=근접폭발 2=단발총성 3=연발총성 4=포성rumble */
-    int samples = 0;
-
-    if (type == 0 || type == 1) {
-        BOOL close = (type == 1);
-        int whistleLen = (int)((0.20f + WarRandF() * 0.25f) * WAR_SAMPLE_RATE);
-        int boomLen = (int)((0.9f + WarRandF() * 0.7f) * WAR_SAMPLE_RATE);
-        samples = whistleLen + boomLen;
-        if (samples > WAR_MAX_EVENT_SAMPLES) samples = WAR_MAX_EVENT_SAMPLES;
-        float hiFreq = 700.0f + WarRandF() * 500.0f;
-        for (int j = 0; j < whistleLen && j < samples; j++) {
-            float t = (float)j / (float)whistleLen;
-            float freq = hiFreq - t * (hiFreq - 120.0f);
-            float env = (1.0f - t) * (close ? 0.55f : 0.30f);
-            float s = sinf(2.0f * PI_F * freq * (float)j / (float)WAR_SAMPLE_RATE);
-            int v = 128 + (int)(s * env * 10.0f);
-            if (v < 0) v = 0; if (v > 255) v = 255;
-            g_warBuf[j] = (unsigned char)v;
-        }
-        float subFreq = 16.0f + WarRandF() * 14.0f; /* 16~30Hz -- 아주 낮은 저역 위주 */
-        for (int j = 0; j < boomLen; j++) {
-            int idx = whistleLen + j;
-            if (idx >= samples) break;
-            float t = (float)j / (float)boomLen;
-            float env = expf(-t * (close ? 2.0f : 3.0f));
-            float lowFreq = subFreq - t * (subFreq * 0.4f);
-            float s = sinf(2.0f * PI_F * lowFreq * (float)j / (float)WAR_SAMPLE_RATE);
-            float n = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
-            float amp = (close ? 100.0f : 65.0f) * (0.85f + WarRandF() * 0.3f);
-            int v = 128 + (int)((s * 0.78f + n * 0.22f) * env * amp);
-            if (v < 0) v = 0; if (v > 255) v = 255;
-            g_warBuf[idx] = (unsigned char)v;
-        }
-    } else if (type == 2 || type == 3) {
-        int shots = (type == 2) ? 1 : (2 + rand() % 4);
-        int shotLen = (int)(0.03f * WAR_SAMPLE_RATE);
-        int gapSamples = (int)((0.05f + WarRandF() * 0.06f) * WAR_SAMPLE_RATE);
-        samples = shots * gapSamples + shotLen;
-        if (samples > WAR_MAX_EVENT_SAMPLES) samples = WAR_MAX_EVENT_SAMPLES;
-        for (int j = 0; j < samples; j++) g_warBuf[j] = 128;
-        float shotFreq = 55.0f + WarRandF() * 40.0f; /* 55~95Hz -- 총성도 저음 위주 */
-        for (int s2 = 0; s2 < shots; s2++) {
-            int base = s2 * gapSamples;
-            for (int j = 0; j < shotLen; j++) {
-                int idx = base + j;
-                if (idx < 0 || idx >= samples) continue;
-                float t = (float)j / (float)shotLen;
-                float env = expf(-t * 14.0f);
-                float n = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
-                float low = sinf(2.0f * PI_F * shotFreq * (float)j / (float)WAR_SAMPLE_RATE);
-                int v = 128 + (int)((n * 0.45f + low * 0.55f) * env * 60.0f);
-                if (v < 0) v = 0; if (v > 255) v = 255;
-                g_warBuf[idx] = (unsigned char)v;
-            }
-        }
-    } else {
-        /* 포성 rumble -- 아주 낮고 긴 저음, 서서히 커졌다 작아짐 */
-        int len = (int)((1.0f + WarRandF() * 1.0f) * WAR_SAMPLE_RATE);
-        samples = (len > WAR_MAX_EVENT_SAMPLES) ? WAR_MAX_EVENT_SAMPLES : len;
-        float freq = 14.0f + WarRandF() * 10.0f; /* 14~24Hz -- 체감형 초저역 */
-        for (int j = 0; j < samples; j++) {
-            float t = (float)j / (float)samples;
-            float env = sinf(PI_F * t);
-            float s = sinf(2.0f * PI_F * freq * (float)j / (float)WAR_SAMPLE_RATE);
-            float n = ((float)(rand() % 2001) - 1000.0f) / 1000.0f;
-            int v = 128 + (int)((s * 0.82f + n * 0.18f) * env * 45.0f);
-            if (v < 0) v = 0; if (v > 255) v = 255;
-            g_warBuf[j] = (unsigned char)v;
-        }
-    }
-
-    waveOutReset(g_waveOutWar);
-    if (g_warHdr.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(g_waveOutWar, &g_warHdr, sizeof(WAVEHDR));
-    ZeroMemory(&g_warHdr, sizeof(WAVEHDR));
-    g_warHdr.lpData = (LPSTR)g_warBuf;
-    g_warHdr.dwBufferLength = (DWORD)samples;
-    waveOutPrepareHeader(g_waveOutWar, &g_warHdr, sizeof(WAVEHDR));
-    waveOutWrite(g_waveOutWar, &g_warHdr, sizeof(WAVEHDR));
-}
-
-/* 인트로/게임플레이 중에만, 그리고 미션 성공(RESULT_HIT) 전까지만 -- 0.6~2.8초의 랜덤
-   간격마다 새 이벤트를 하나씩 터뜨린다. */
-static void UpdateWarLoop(float dt) {
+/* 인트로/게임플레이 중에만, 그리고 미션 성공(RESULT_HIT) 전까지만 재생 */
+static void UpdateWarLoop(void) {
     if (!g_warOutOpen) return;
     BOOL inMission = (scene == SCENE_INTRO || scene == SCENE_GAMEPLAY);
     BOOL shouldPlay = soundOn && inMission && finalResult != RESULT_HIT;
     if (!shouldPlay) {
-        g_warNextEventIn = 0.3f + WarRandF() * 0.5f; /* 다음에 들어올 때 곧바로 안 터지게 약간의 지연 */
+        if (g_warPlaying) {
+            waveOutReset(g_waveOutWar);
+            g_warPlaying = FALSE;
+        }
         return;
     }
-    g_warNextEventIn -= dt;
-    if (g_warNextEventIn <= 0.0f) {
-        PlayWarEvent();
-        g_warNextEventIn = 0.6f + WarRandF() * 2.2f;
+    if (!g_warPlaying || (g_warHdr.dwFlags & WHDR_DONE)) {
+        if (g_warHdr.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(g_waveOutWar, &g_warHdr, sizeof(WAVEHDR));
+        ZeroMemory(&g_warHdr, sizeof(WAVEHDR));
+        g_warHdr.lpData = (LPSTR)g_warBuf;
+        g_warHdr.dwBufferLength = WAR_TOTAL_SAMPLES;
+        waveOutPrepareHeader(g_waveOutWar, &g_warHdr, sizeof(WAVEHDR));
+        waveOutWrite(g_waveOutWar, &g_warHdr, sizeof(WAVEHDR));
+        g_warPlaying = TRUE;
     }
 }
 
@@ -786,17 +813,20 @@ static void RenderLobby(void) {
         scene = SCENE_OPTIONS;
     }
 
-    /* 시작 -- 버튼 대신 "아무키나 눌러서 시작" 문구, 화면 중앙보다 살짝 아래.
-       ESC는 이제 게임 종료(아래 UpdateGame)라서 "아무키"에서 제외해야 충돌 안 남 */
+    /* 시작 -- 버튼 대신 "아무키나 눌러서 시작" 문구, 세로 90% 지점(화면 하단 쪽).
+       ESC는 이제 게임 종료(아래 UpdateGame)라서 "아무키"에서 제외해야 충돌 안 남.
+       마우스 클릭으로도 시작되지만, 톱니바퀴를 누른 클릭은 옵션만 열고 시작은 안 되게 함 */
     if (!inputBlocked) {
-        QueueTextCentered(0, GAME_H / 2 + 30, GAME_W, 24, 1, 0xFFFFFFFF, Kor("아무키나 눌러서 시작"));
+        QueueTextCentered(0, GAME_H * 9 / 10 - 12, GAME_W, 24, 1, 0xFFFFFFFF, Kor("아무키나 눌러서 시작"));
+        BOOL startTriggered = FALSE;
         for (int i = 0; i < 256; i++) {
             if (i == VK_ESCAPE) continue;
-            if (keys[i] && !keysPrev[i]) {
-                scene = SCENE_INTRO;
-                introTimer = 0.0f;
-                break;
-            }
+            if (keys[i] && !keysPrev[i]) { startTriggered = TRUE; break; }
+        }
+        if (!gearHover && mouseDown && !mouseDownPrev) startTriggered = TRUE;
+        if (startTriggered) {
+            scene = SCENE_INTRO;
+            introTimer = 0.0f;
         }
     }
 }
@@ -1557,7 +1587,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
         UpdateGame(dt);
         RenderGame();
         UpdateMusicLoop();
-        UpdateWarLoop(dt);
+        UpdateWarLoop();
 
         RECT client;
         GetClientRect(hwnd, &client);
