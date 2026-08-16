@@ -606,8 +606,12 @@ static void DuckWarAmbience(void);
 
 /* 3단계 명중 시 망치로 때린 듯한 타격음 -- 틱과 같은 핸들을 재사용(동시에 울릴 일이 없음:
    드래그 중엔 3단계에 없고, 3단계에선 드래그를 안 함). 상승하는 맑은 차임이었던 걸
-   "캐쥬얼하다"는 피드백으로 교체 -- 노이즈 트랜지언트(타격 순간 "탁") + 낮은 통울림
-   바디(둔탁한 저음 "퉁") + 짧은 금속성 배음(쇠붙이 느낌 살짝) 3레이어를 섞음. */
+   "캐쥬얼하다"는 피드백으로 교체했었는데, 저음 바디 버전은 "안 들린다"는 피드백을
+   받음 -- 노트북/모니터 내장 스피커는 100~200Hz대를 거의 재생 못 하는 경우가
+   많아서 볼륨을 아무리 키워도 저음 자체가 안 들렸을 가능성이 큼. 그래서 저음을
+   완전히 빼고, 망치가 "쇠"에 부딪히는 쨍한 금속성 클랭(비화성 배음 여러 개)으로
+   전면 교체 -- 노이즈 트랜지언트(타격 순간 "탁")도 광대역이라 저음 스피커에서도
+   항상 잘 들림. */
 static void PlayHitSound(void) {
     if (!soundOn || !g_tickOutOpen) return;
     waveOutReset(g_waveOutTick);
@@ -621,21 +625,21 @@ static void PlayHitSound(void) {
         float noiseEnv = expf(-t * 45.0f);
         float noise = ((float)(rand() % 2001 - 1000) / 1000.0f) * noiseEnv;
 
-        /* 낮은 통울림(바디): 전장 앰비언스의 저음 폭발음과 겹치는 대역을 살짝 피하려고
-           110 -> 145Hz로 올림 -- 천천히 감쇠, 망치머리가 때리는 둔탁한 저음 "퉁" */
-        float bodyEnv = expf(-t * 6.0f);
-        float body = sinf(2.0f * PI_F * 145.0f * ph) * bodyEnv;
+        /* 금속성 클랭 -- 저음 없이 서로 배수 관계가 아닌(비화성) 배음 3개를 각각 다른
+           속도로 감쇠시켜서 "쇠붙이가 쨍하고 부딪히는" 느낌을 냄. 전부 중고음역대라
+           저음이 약한 스피커에서도 잘 들림. */
+        float e1 = expf(-t * 10.0f);
+        float e2 = expf(-t * 16.0f);
+        float e3 = expf(-t * 26.0f);
+        float clang = sinf(2.0f * PI_F * 520.0f * ph) * e1
+                    + sinf(2.0f * PI_F * 1180.0f * ph) * e2 * 0.7f
+                    + sinf(2.0f * PI_F * 1850.0f * ph) * e3 * 0.5f;
 
-        /* 금속성 배음 -- 저음 위주인 전장 앰비언스 사이를 뚫고 나오게 비중을 늘림
-           (쇠붙이끼리 부딪히는 느낌 + 고음 성분으로 존재감 확보) */
-        float ringEnv = expf(-t * 18.0f);
-        float ring = sinf(2.0f * PI_F * 1100.0f * ph) * ringEnv;
-
-        float s = noise * 0.55f + body * 1.0f + ring * 0.28f;
+        float s = noise * 0.5f + clang * 0.5f;
         /* 하드클리핑 대신 tanh 소프트새추레이션 -- 그냥 곱해서 클램프하면 파형이 각지게
            잘려서(디지털 클리핑) 오히려 "약하고 지지직대는" 느낌이 남. tanh는 부드럽게
            눌러줘서 훨씬 크고 뭉툭한(펀치感 있는) 소리가 됨. */
-        float driven = s * 3.2f;
+        float driven = s * 3.0f;
         float soft = tanhf(driven);
         int v = 128 + (int)(soft * 120.0f);
         if (v < 0) v = 0;
