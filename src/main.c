@@ -434,6 +434,30 @@ static HDC g_screenDC;    /* 실제 화면(창) DC -- BitBlt 대상 */
 static HBITMAP g_memBitmap, g_memBitmapOld;
 static HFONT g_fontSmall, g_fontMedium, g_fontLarge;
 
+/* ---------- 커스텀 한글 폰트(HBIOS-SYS, 서브셋) -- 설치 없이 프로세스 전용으로만 등록 ----------
+   fonts/HBIOS-SYS.ttf(게임에 실제 쓰이는 글자만 남긴 서브셋, 라이선스는 fonts/LICENSE-HBIOS-SYS.txt
+   참고)를 실행 중에만 AddFontMemResourceEx로 등록해서 CreateFontW에서 이름으로 골라 쓸 수 있게
+   한다. 로드 실패하면 기존 시스템 폰트(맑은 고딕)로 자동 폴백. */
+#define CUSTOM_FONT_MAX_SIZE 65536
+static unsigned char g_customFontData[CUSTOM_FONT_MAX_SIZE];
+static HANDLE g_customFontRes = NULL;
+static BOOL g_customFontLoaded = FALSE;
+
+static BOOL LoadCustomFont(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return FALSE;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > CUSTOM_FONT_MAX_SIZE) { fclose(f); return FALSE; }
+    size_t rd = fread(g_customFontData, 1, (size_t)sz, f);
+    fclose(f);
+    if (rd != (size_t)sz) return FALSE;
+    DWORD numFonts = 0;
+    g_customFontRes = AddFontMemResourceEx(g_customFontData, (DWORD)sz, NULL, &numFonts);
+    return (g_customFontRes != NULL && numFonts > 0);
+}
+
 static void QueueTextPoint(int x, int y, int fontIdx, uint32_t color, const wchar_t *text) {
     if (textQueueCount >= TEXT_QUEUE_CAP) return;
     TextCmd *c = &textQueue[textQueueCount++];
@@ -1845,15 +1869,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     g_memBitmap = CreateCompatibleBitmap(hdc, initClient.right, initClient.bottom);
     g_memBitmapOld = (HBITMAP)SelectObject(g_hdc, g_memBitmap);
     SetBkMode(g_hdc, TRANSPARENT);
+
+    char fontPath[MAX_PATH];
+    GetAssetPath(fontPath, MAX_PATH, "fonts\\HBIOS-SYS.ttf");
+    g_customFontLoaded = LoadCustomFont(fontPath);
+    const wchar_t *uiFontName = g_customFontLoaded ? L"HBIOS-SYS" : Kor("맑은 고딕");
+
     g_fontSmall  = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         HANGUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, Kor("맑은 고딕"));
+        DEFAULT_PITCH | FF_DONTCARE, uiFontName);
     g_fontMedium = CreateFontW(-26, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         HANGUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, Kor("맑은 고딕"));
+        DEFAULT_PITCH | FF_DONTCARE, uiFontName);
     g_fontLarge  = CreateFontW(-56, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         HANGUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, Kor("맑은 고딕"));
+        DEFAULT_PITCH | FF_DONTCARE, uiFontName);
 
     LARGE_INTEGER freq, prev, now;
     QueryPerformanceFrequency(&freq);
@@ -1893,6 +1923,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     DeleteObject(g_fontSmall);
     DeleteObject(g_fontMedium);
     DeleteObject(g_fontLarge);
+    if (g_customFontRes) RemoveFontMemResourceEx(g_customFontRes);
     if (g_waveOutOpen) waveOutClose(g_waveOut);
     if (g_musicOutOpen) { waveOutReset(g_waveOutMusic); waveOutClose(g_waveOutMusic); }
     if (g_warOutOpen) { waveOutReset(g_waveOutWar); waveOutClose(g_waveOutWar); }

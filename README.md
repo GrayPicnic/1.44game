@@ -23,6 +23,12 @@ K9 자주포 수동 사격 절차를 모티브로 한 밀(Mil) 단위 방열 게
   실제 육성 녹음을 밴드패스+링모듈레이션+비트크러시로 가공한 PCM. `build.sh`가
   `dist/audio/`로 같이 복사. 나머지 모든 사운드(BGM/전장 앰비언스/틱/명중음/지직
   잡음)는 오디오 파일 없이 코드로 직접 합성함(자세한 배경은 `CONTEXT.md` 참고).
+- `fonts/HBIOS-SYS.ttf` — 게임 UI 한글 텍스트용 폰트(BIOS/터미널 스타일). 원본은
+  완성형 한글 전체 포함 5.6MB지만, 게임에 실제 쓰이는 글자만 남긴 서브셋(33KB)만
+  담음. 설치 없이 실행 중에만 `AddFontMemResourceEx`로 등록(`build.sh`가
+  `dist/fonts/`로 같이 복사). 라이선스/크레딧/재서브셋 방법은
+  `fonts/LICENSE-HBIOS-SYS.txt` 참고 — **새 한글 문구를 추가하면 서브셋을
+  다시 뽑아야 함**.
 - `build.sh` — mingw-w64로 Windows용 실행파일을 크기 최적화 빌드
 - `check_size.sh` — 빌드 결과물이 1.44MB 제한 내에 있는지 검사
 

@@ -28,6 +28,12 @@ if [ -d audio ]; then
     cp -f audio/*.bin dist/audio/ 2>/dev/null || true
 fi
 
+# 한글 폰트(서브셋)도 같이 담는다 (exe 옆 fonts/ 폴더에서 런타임에 AddFontMemResourceEx로 등록)
+if [ -d fonts ]; then
+    mkdir -p dist/fonts
+    cp -f fonts/*.ttf dist/fonts/ 2>/dev/null || true
+fi
+
 echo "빌드 완료: $OUT"
 ls -lh "$OUT"
 du -sh dist
