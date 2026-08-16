@@ -588,6 +588,90 @@ static void PlayHitSound(void) {
     waveOutWrite(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
 }
 
+/* ---------- 무전 콜아웃 보이스: 실제 육성 녹음(0~9) -- 밴드패스+링모듈레이션+비트크러시로
+   가공한 샘플을 audio/voice_digits.bin에서 읽어와 재생. 방위각/사각/장약 숫자를 순서대로
+   불러줄 때 사용. waveOut은 waveOutWrite를 연달아 호출하면 버퍼들을 자동으로 순서대로
+   이어 재생해주므로(드라이버 큐), 여러 자리 숫자를 헤더 여러 개로 큐잉하면 됨. */
+#define VOICE_SAMPLE_RATE 8000
+#define VOICE_DIGIT_COUNT 10
+#define VOICE_MAX_LEN 6000   /* 실측 최대 4186바이트, 재녹음 대비 여유 확보 */
+#define VOICE_MAX_DIGITS 4   /* 한 번에 이어 재생할 최대 자리수 (장약=2자리, 방위각/사각=1자리씩) */
+
+static unsigned char g_voiceDigitData[VOICE_DIGIT_COUNT][VOICE_MAX_LEN];
+static int g_voiceDigitLen[VOICE_DIGIT_COUNT];
+static BOOL g_voiceLoaded = FALSE;
+
+static HWAVEOUT g_waveOutVoice = NULL;
+static BOOL g_voiceOutOpen = FALSE;
+static WAVEHDR g_voiceHdrs[VOICE_MAX_DIGITS];
+
+/* audio/voice_digits.bin 포맷: (uint32 길이 + PCM 데이터) x 10, 인덱스=숫자값(0~9) 순서 */
+static BOOL LoadVoiceDigits(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return FALSE;
+    for (int i = 0; i < VOICE_DIGIT_COUNT; i++) {
+        uint32_t len;
+        if (fread(&len, sizeof(len), 1, f) != 1) { fclose(f); return FALSE; }
+        if (len > VOICE_MAX_LEN) { fclose(f); return FALSE; }
+        if (fread(g_voiceDigitData[i], 1, len, f) != len) { fclose(f); return FALSE; }
+        g_voiceDigitLen[i] = (int)len;
+    }
+    fclose(f);
+    return TRUE;
+}
+
+static void InitVoice(void) {
+    WAVEFORMATEX wfx;
+    ZeroMemory(&wfx, sizeof(wfx));
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = 1;
+    wfx.nSamplesPerSec = VOICE_SAMPLE_RATE;
+    wfx.wBitsPerSample = 8;
+    wfx.nBlockAlign = 1;
+    wfx.nAvgBytesPerSec = VOICE_SAMPLE_RATE;
+    if (waveOutOpen(&g_waveOutVoice, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR) {
+        g_voiceOutOpen = TRUE;
+    }
+}
+
+/* 여러 자리 숫자를 순서대로 이어 재생 (예: {1,8} -> "일" 다음 "팔") */
+static void PlayVoiceDigits(const int *digits, int count) {
+    if (!soundOn || !g_voiceOutOpen || !g_voiceLoaded) return;
+    waveOutReset(g_waveOutVoice);
+    for (int i = 0; i < VOICE_MAX_DIGITS; i++) {
+        if (g_voiceHdrs[i].dwFlags & WHDR_PREPARED) {
+            waveOutUnprepareHeader(g_waveOutVoice, &g_voiceHdrs[i], sizeof(WAVEHDR));
+        }
+        ZeroMemory(&g_voiceHdrs[i], sizeof(WAVEHDR));
+    }
+    if (count > VOICE_MAX_DIGITS) count = VOICE_MAX_DIGITS;
+    for (int i = 0; i < count; i++) {
+        int d = digits[i];
+        if (d < 0 || d > 9) continue;
+        g_voiceHdrs[i].lpData = (LPSTR)g_voiceDigitData[d];
+        g_voiceHdrs[i].dwBufferLength = (DWORD)g_voiceDigitLen[d];
+        waveOutPrepareHeader(g_waveOutVoice, &g_voiceHdrs[i], sizeof(WAVEHDR));
+        waveOutWrite(g_waveOutVoice, &g_voiceHdrs[i], sizeof(WAVEHDR));
+    }
+}
+
+static void PlayVoiceDigit(int d) {
+    PlayVoiceDigits(&d, 1);
+}
+
+/* value를 앞자리부터 numDigits자리로 분해해서 이어 읽음 (0으로 패딩되는 자리도 포함해서
+   그대로 읽음 -- 실제 포병처럼 "0245"도 앞자리 0을 생략하지 않고 그대로 읽는 방식과 동일) */
+static void PlayVoiceNumber(int value, int numDigits) {
+    int digits[VOICE_MAX_DIGITS];
+    if (numDigits > VOICE_MAX_DIGITS) numDigits = VOICE_MAX_DIGITS;
+    int v = value;
+    for (int i = numDigits - 1; i >= 0; i--) {
+        digits[i] = v % 10;
+        v /= 10;
+    }
+    PlayVoiceDigits(digits, numDigits);
+}
+
 /* ---------- BGM: 칩튠 베이스라인도 코드로 직접 합성 (오디오 파일 0개 원칙 유지) ----------
    waveOut 핸들을 SFX(g_waveOut)와 별도로 하나 더 열어서(g_waveOutMusic) 지직 잡음이랑
    동시에 재생돼도 서로 안 끊기게 한다. 루프는 한 번에 다 렌더링해둔 버퍼를
@@ -1100,6 +1184,23 @@ static void UpdateIntro(float dt) {
 
 /* ---------- 씬: 조작화면 ---------- */
 
+/* 말풍선이 새 phase로 넘어갈 때(=화면에 새 숫자가 뜨는 순간) 그 자리 숫자를 음성으로 콜아웃.
+   방위각/사각은 phase가 짝수(0,2,4,6)일 때마다 그 자리 숫자 하나씩, 장약은 문장이 다시
+   나타나는 사이클 시작(phase==0)에 두 자리 숫자를 이어서 읽는다. */
+static void TriggerBubbleVoice(int phase) {
+    if (fireStage == FIRESTAGE_CHARGE) {
+        if (phase == 0) PlayVoiceNumber(chargeTargetNumber, 2);
+        return;
+    }
+    if (phase % 2 != 0) return; /* 홀수=공백 구간 */
+    int bubbleTarget = (fireStage == FIRESTAGE_AZIMUTH) ? azTargetMil : elTargetMil;
+    int digits[4] = {
+        (bubbleTarget / 1000) % 10, (bubbleTarget / 100) % 10,
+        (bubbleTarget / 10) % 10, bubbleTarget % 10
+    };
+    PlayVoiceDigit(digits[phase / 2]);
+}
+
 static void UpdateGameplay(float dt) {
     if (missionFailed) {
         /* 조작 불가 -- 검정화면 홀드 후 로비로 */
@@ -1136,6 +1237,7 @@ static void UpdateGameplay(float dt) {
                     bubbleIntroActive = FALSE;
                     bubblePhase = 0;
                     bubbleTimer = 0.0f;
+                    TriggerBubbleVoice(0);
                 }
             }
         } else {
@@ -1144,6 +1246,7 @@ static void UpdateGameplay(float dt) {
             if (bubbleTimer >= phaseDur[bubblePhase]) {
                 bubbleTimer = 0.0f;
                 bubblePhase = (bubblePhase + 1) % 8;
+                TriggerBubbleVoice(bubblePhase);
             }
         }
     }
@@ -1688,6 +1791,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     InitMusic();
     InitWar();
     InitTick();
+    InitVoice();
 
     char lobbyBgPath[MAX_PATH];
     GetAssetPath(lobbyBgPath, MAX_PATH, "images\\Lobby.bmp");
@@ -1696,6 +1800,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     char logoPath[MAX_PATH];
     GetAssetPath(logoPath, MAX_PATH, "images\\Logo.bmp");
     logoLoaded = LoadBmpInto(logoPath, logoPixels, 0, 0, LOGO_MAX_W, LOGO_MAX_H, &logoW, &logoH);
+
+    char voicePath[MAX_PATH];
+    GetAssetPath(voicePath, MAX_PATH, "audio\\voice_digits.bin");
+    g_voiceLoaded = LoadVoiceDigits(voicePath);
 
     WNDCLASSA wc = {0};
     wc.lpfnWndProc = WndProc;

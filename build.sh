@@ -22,6 +22,12 @@ if [ -d images ]; then
     cp -f images/*.bmp dist/images/ 2>/dev/null || true
 fi
 
+# 무전 콜아웃 보이스 에셋(숫자 0~9 PCM)도 같이 담는다 (exe 옆 audio/ 폴더에서 런타임에 읽음)
+if [ -d audio ]; then
+    mkdir -p dist/audio
+    cp -f audio/*.bin dist/audio/ 2>/dev/null || true
+fi
+
 echo "빌드 완료: $OUT"
 ls -lh "$OUT"
 du -sh dist
