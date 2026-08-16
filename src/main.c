@@ -97,12 +97,14 @@ static const float BUBBLE_PHASE_DUR[8] = {
     BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME, BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME,
     BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME, BUBBLE_DIGIT_TIME, BUBBLE_PAUSE_TIME
 };
-/* 4단계(장약)는 콜아웃 사이 끊기는(공백) 시간을 3배로 늘려서 여유있게 들리게 함 */
-#define BUBBLE_GAP_TIME_CHARGE (BUBBLE_GAP_TIME * 3.0f)
-#define BUBBLE_PAUSE_TIME_CHARGE (BUBBLE_PAUSE_TIME * 3.0f)
-static const float BUBBLE_PHASE_DUR_CHARGE[8] = {
-    BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME_CHARGE, BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME_CHARGE,
-    BUBBLE_DIGIT_TIME, BUBBLE_GAP_TIME_CHARGE, BUBBLE_DIGIT_TIME, BUBBLE_PAUSE_TIME_CHARGE
+/* 4단계(장약)는 문장이 통째로 뜨고 사라지는 방식이라 다른 스테이지의 4자리 콜아웃과
+   달리 2단계(표시-대기)만 씀: 1초 유지 후 사라지고, 3초 쉬었다가 다시 표시 + 사운드.
+   너무 자주 뜨면 시끄러워서 대기시간을 길게 둠. */
+#define CHARGE_BUBBLE_SHOW_TIME 1.0f
+#define CHARGE_BUBBLE_HIDE_TIME 3.0f
+#define CHARGE_BUBBLE_PHASE_COUNT 2
+static const float BUBBLE_PHASE_DUR_CHARGE[CHARGE_BUBBLE_PHASE_COUNT] = {
+    CHARGE_BUBBLE_SHOW_TIME, CHARGE_BUBBLE_HIDE_TIME
 };
 
 /* 각 스테이지 진입 직후 딱 한 번, 말풍선이 핑크 배경째로 빠르게 3번 깜빡이는 "치직" 연출.
@@ -1242,10 +1244,12 @@ static void UpdateGameplay(float dt) {
             }
         } else {
             bubbleTimer += dt;
-            const float *phaseDur = (fireStage == FIRESTAGE_CHARGE) ? BUBBLE_PHASE_DUR_CHARGE : BUBBLE_PHASE_DUR;
+            BOOL isChargeStage = (fireStage == FIRESTAGE_CHARGE);
+            const float *phaseDur = isChargeStage ? BUBBLE_PHASE_DUR_CHARGE : BUBBLE_PHASE_DUR;
+            int phaseCount = isChargeStage ? CHARGE_BUBBLE_PHASE_COUNT : 8;
             if (bubbleTimer >= phaseDur[bubblePhase]) {
                 bubbleTimer = 0.0f;
-                bubblePhase = (bubblePhase + 1) % 8;
+                bubblePhase = (bubblePhase + 1) % phaseCount;
                 TriggerBubbleVoice(bubblePhase);
             }
         }
