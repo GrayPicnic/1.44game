@@ -40,8 +40,9 @@ static Scene scene = SCENE_LOBBY;
 static Scene sceneBeforeOptions = SCENE_LOBBY;
 
 static BOOL soundOn = TRUE;
-static int langIndex = 0; /* 0=한국어 1=영어 2=일본어 -- 지금은 한국어 문구만 있고 나머지는 추후 추가 */
+static int langIndex = 0; /* 0=한국어 1=영어 2=일본어 -- 일본어는 아직 미번역이라 한국어로 폴백(T() 참고) */
 static const char *LANG_NAMES[3] = { "한국어", "영어", "일본어" };
+static const char *LANG_NAMES_EN[3] = { "Korean", "English", "Japanese" };
 
 static float introTimer = 0.0f;
 
@@ -417,6 +418,13 @@ static const wchar_t *Kor(const char *utf8) {
     return buf;
 }
 
+/* 언어 전환용: langIndex==1(영어)이면 영문을, 그 외(한국어/아직 미번역인 일본어)는
+   한국어 원문을 고른다. 영문도 순수 ASCII라 UTF-8 취급해도 문제없어서 Kor()를
+   그대로 재사용(회전버퍼 4칸 규칙도 Kor()와 동일하게 적용됨). */
+static const wchar_t *T(const char *kor, const char *eng) {
+    return Kor((langIndex == 1) ? eng : kor);
+}
+
 #define TEXT_QUEUE_CAP 48
 typedef struct {
     int x, y, w, h;   /* w==0 이면 (x,y)를 좌상단으로 그대로 출력, 아니면 rect 안에서 가운데 정렬 */
@@ -590,19 +598,33 @@ static void PlayTick(void) {
     waveOutWrite(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
 }
 
-/* 3단계 명중 시 상승 차임 -- 틱과 같은 핸들을 재사용(동시에 울릴 일이 없음: 드래그 중엔
-   3단계에 없고, 3단계에선 드래그를 안 함) */
+/* 3단계 명중 시 망치로 때린 듯한 타격음 -- 틱과 같은 핸들을 재사용(동시에 울릴 일이 없음:
+   드래그 중엔 3단계에 없고, 3단계에선 드래그를 안 함). 상승하는 맑은 차임이었던 걸
+   "캐쥬얼하다"는 피드백으로 교체 -- 노이즈 트랜지언트(타격 순간 "탁") + 낮은 통울림
+   바디(둔탁한 저음 "퉁") + 짧은 금속성 배음(쇠붙이 느낌 살짝) 3레이어를 섞음. */
 static void PlayHitSound(void) {
     if (!soundOn || !g_tickOutOpen) return;
     waveOutReset(g_waveOutTick);
     if (g_tickHdr.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
 
     for (int i = 0; i < HIT_SAMPLES; i++) {
-        float t = (float)i / (float)HIT_SAMPLES;
-        float freq = 500.0f + t * 700.0f; /* 500 -> 1200Hz로 상승 */
-        float env = expf(-t * 5.0f);
-        float s = sinf(2.0f * PI_F * freq * (float)i / (float)TICK_SAMPLE_RATE);
-        int v = 128 + (int)(s * env * 50.0f);
+        float t = (float)i / (float)HIT_SAMPLES;         /* 0..1 진행률(엔벨로프용) */
+        float ph = (float)i / (float)TICK_SAMPLE_RATE;   /* 경과 시간(초, 위상 계산용) */
+
+        /* 타격 트랜지언트: 아주 짧게(~10ms) 감쇠하는 노이즈 -- 망치가 부딪히는 순간의 "탁" */
+        float noiseEnv = expf(-t * 45.0f);
+        float noise = ((float)(rand() % 2001 - 1000) / 1000.0f) * noiseEnv;
+
+        /* 낮은 통울림(바디): 110Hz가 천천히 감쇠 -- 망치머리가 때리는 둔탁한 저음 "퉁" */
+        float bodyEnv = expf(-t * 6.0f);
+        float body = sinf(2.0f * PI_F * 110.0f * ph) * bodyEnv;
+
+        /* 짧고 조용한 금속성 배음 -- 쇠붙이끼리 부딪히는 느낌만 살짝 */
+        float ringEnv = expf(-t * 20.0f);
+        float ring = sinf(2.0f * PI_F * 950.0f * ph) * ringEnv;
+
+        float s = noise * 0.5f + body * 1.0f + ring * 0.15f;
+        int v = 128 + (int)(s * 80.0f);
         if (v < 0) v = 0;
         if (v > 255) v = 255;
         g_hitBuf[i] = (unsigned char)v;
@@ -1048,11 +1070,11 @@ static void RenderLobby(void) {
     } else if (lobbyBgLoaded) {
         /* 사진 배경 위라 제목 글자가 묻히지 않게 반투명 검정 배경을 살짝 깔아줌 */
         FillPixelRectAlpha(170, 40, 300, 90, 0x000000, 0.45f);
-        if (!inputBlocked) QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, Kor("게임 타이틀"));
+        if (!inputBlocked) QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, T("게임 타이틀", "GAME TITLE"));
     } else {
         FillPixelRect(170, 40, 300, 90, 0xFF6B3FA0); /* title image placeholder */
         DrawRectOutline(170, 40, 300, 90, 0xFFEEEEEE);
-        if (!inputBlocked) QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, Kor("게임 타이틀"));
+        if (!inputBlocked) QueueTextCentered(170, 40, 300, 90, 1, 0xFFFFFFFF, T("게임 타이틀", "GAME TITLE"));
     }
 
     /* 옵션 -- 버튼 대신 우상단 톱니바퀴 아이콘 */
@@ -1070,7 +1092,7 @@ static void RenderLobby(void) {
        ESC는 이제 게임 종료(아래 UpdateGame)라서 "아무키"에서 제외해야 충돌 안 남.
        마우스 클릭으로도 시작되지만, 톱니바퀴를 누른 클릭은 옵션만 열고 시작은 안 되게 함 */
     if (!inputBlocked) {
-        QueueTextCentered(0, GAME_H * 9 / 10 - 12, GAME_W, 24, 1, 0xFFFFFFFF, Kor("아무키나 눌러서 시작"));
+        QueueTextCentered(0, GAME_H * 9 / 10 - 12, GAME_W, 24, 1, 0xFFFFFFFF, T("아무키나 눌러서 시작", "Press Any Key to Start"));
         BOOL startTriggered = FALSE;
         for (int i = 0; i < 256; i++) {
             if (i == VK_ESCAPE) continue;
@@ -1089,19 +1111,21 @@ static void RenderLobby(void) {
 static void RenderOptions(void) {
     FillPixelRect(140, 90, 360, 180, 0xFF2A2A3A);
     DrawRectOutline(140, 90, 360, 180, 0xFFEEEEEE);
-    QueueTextPoint(160, 110, 1, 0xFFFFFFFF, Kor("옵션"));
+    QueueTextPoint(160, 110, 1, 0xFFFFFFFF, T("옵션", "Options"));
 
     char soundLabelU8[32];
-    wsprintfA(soundLabelU8, "사운드: %s", soundOn ? "켬" : "끔");
+    if (langIndex == 1) wsprintfA(soundLabelU8, "Sound: %s", soundOn ? "On" : "Off");
+    else wsprintfA(soundLabelU8, "사운드: %s", soundOn ? "켬" : "끔");
     Button soundBtn = { 170, 150, 300, 40, 0xFFD08020, Kor(soundLabelU8) };
     if (ButtonClicked(&soundBtn)) soundOn = !soundOn;
 
     char langLabelU8[32];
-    wsprintfA(langLabelU8, "언어: %s", LANG_NAMES[langIndex]);
+    if (langIndex == 1) wsprintfA(langLabelU8, "Language: %s", LANG_NAMES_EN[langIndex]);
+    else wsprintfA(langLabelU8, "언어: %s", LANG_NAMES[langIndex]);
     Button langBtn = { 170, 200, 300, 40, 0xFF20A0A0, Kor(langLabelU8) };
     if (ButtonClicked(&langBtn)) langIndex = (langIndex + 1) % 3;
 
-    Button backBtn = { 170, 250, 300, 40, 0xFF606060, Kor("뒤로") };
+    Button backBtn = { 170, 250, 300, 40, 0xFF606060, T("뒤로", "Back") };
     if (ButtonClicked(&backBtn) || (keys[VK_ESCAPE] && !keysPrev[VK_ESCAPE])) {
         scene = sceneBeforeOptions;
     }
@@ -1114,9 +1138,9 @@ static void RenderIntro(void) {
 
     FillPixelRect(40, 230, GAME_W - 80, 100, 0xFF4A3524); /* npc dialogue box */
     DrawRectOutline(40, 230, GAME_W - 80, 100, 0xFFEEEEEE);
-    QueueTextPoint(60, 248, 0, 0xFFFFE0B0, Kor("치지직.. 대대에서 유일한 생존자는"));
-    QueueTextPoint(60, 274, 0, 0xFFFFE0B0, Kor("마지막 명령을 수행하길 바란다."));
-    QueueTextPoint(60, 300, 0, 0xFFFFE0B0, Kor("지금부터 사격재원을 불러주겠다."));
+    QueueTextPoint(60, 248, 0, 0xFFFFE0B0, T("치지직.. 대대에서 유일한 생존자는", "Krzzt.. sole survivor of the battalion,"));
+    QueueTextPoint(60, 274, 0, 0xFFFFE0B0, T("마지막 명령을 수행하길 바란다.", "carry out the final order."));
+    QueueTextPoint(60, 300, 0, 0xFFFFE0B0, T("지금부터 사격재원을 불러주겠다.", "Fire data will be called out now."));
 
     /* 클릭/스페이스로 계속하라는 뜻으로 말풍선 우측 하단에서 위아래로 왔다갔다하는 화살표 */
     float bounce = sinf(introTimer * 5.0f) * 4.0f;
@@ -1533,7 +1557,7 @@ static void UpdateGameplay(float dt) {
 static void RenderGameplay(void) {
     if (missionFailed) {
         ClearScreen(0xFF000000);
-        QueueTextCentered(0, 0, GAME_W, GAME_H, 2, 0xFFFF3030, Kor("포반 전멸"));
+        QueueTextCentered(0, 0, GAME_W, GAME_H, 2, 0xFFFF3030, T("포반 전멸", "SECTION WIPED OUT"));
         return;
     }
 
@@ -1541,9 +1565,9 @@ static void RenderGameplay(void) {
         ClearScreen(0xFF000000);
         const wchar_t *msg;
         uint32_t col;
-        if (finalResult == RESULT_HIT) { msg = Kor("명중"); col = 0xFF3CFF6E; }
-        else if (finalResult == RESULT_MISS) { msg = Kor("임무 실패"); col = 0xFFFF3030; }
-        else { msg = Kor("사격 실패"); col = 0xFFFF3030; }
+        if (finalResult == RESULT_HIT) { msg = T("명중", "HIT"); col = 0xFF3CFF6E; }
+        else if (finalResult == RESULT_MISS) { msg = T("임무 실패", "MISSION FAILED"); col = 0xFFFF3030; }
+        else { msg = T("사격 실패", "FIRE FAILED"); col = 0xFFFF3030; }
         QueueTextCentered(0, 0, GAME_W, GAME_H, 2, col, msg);
     } else {
         ClearScreen(0xFF161B12); /* bg placeholder */
@@ -1568,7 +1592,8 @@ static void RenderGameplay(void) {
                 if (isCharge) {
                     /* 문장 전체를 계속 같은 자리에 표시(자릿수 순차 콜아웃 불필요) */
                     char chargeCallU8[32];
-                    wsprintfA(chargeCallU8, "장약 %d 키로!!", chargeTargetNumber);
+                    if (langIndex == 1) wsprintfA(chargeCallU8, "Charge %d, Load!!", chargeTargetNumber);
+                    else wsprintfA(chargeCallU8, "장약 %d 키로!!", chargeTargetNumber);
                     QueueTextCentered(bubbleX, bubbleY, bubbleW, bubbleH, 1, 0xFFFFFFFF, Kor(chargeCallU8));
                 } else {
                     int bubbleTarget = (fireStage == FIRESTAGE_AZIMUTH) ? azTargetMil : elTargetMil;
@@ -1600,17 +1625,17 @@ static void RenderGameplay(void) {
             DrawRectOutline(230, 140, 160, 100, 0xFFEEEEEE);
         }
         if (fireStage == FIRESTAGE_AZIMUTH) {
-            QueueTextCentered(230, 146, 160, 16, 0, 0xFF88AACC, Kor("방위각 (밀)"));
+            QueueTextCentered(230, 146, 160, 16, 0, 0xFF88AACC, T("방위각 (밀)", "Azimuth (mil)"));
             int curMil = (int)NormalizeMil(azAngleDeg * AZ_MIL_PER_DEG);
             DrawNumber(255, 190, curMil, 4, 0xFF3CFF6E);
         } else if (fireStage == FIRESTAGE_ELEVATION) {
-            QueueTextCentered(230, 146, 160, 16, 0, 0xFF88AACC, Kor("사각 (밀)"));
+            QueueTextCentered(230, 146, 160, 16, 0, 0xFF88AACC, T("사각 (밀)", "Elevation (mil)"));
             DrawNumber(255, 190, (int)(elCurrentMil + 0.5f), 4, 0xFF3CFF6E);
         }
 
         /* 우측 조작부 -- 방위각: 회전 다이얼 / 사각: 세로 릴 / 사격: 타이밍 게이지 */
         if (fireStage == FIRESTAGE_AZIMUTH) {
-            QueueTextCentered(leverCx - 90, leverCy - leverPivotGrabR - 26, 180, 20, 0, 0xFFEEEEEE, Kor("잡고 돌리시오"));
+            QueueTextCentered(leverCx - 90, leverCy - leverPivotGrabR - 26, 180, 20, 0, 0xFFEEEEEE, T("잡고 돌리시오", "Grip and Turn"));
             DrawRing(leverCx, leverCy, 8.0f, 0xFF8A8A9A);
             float visualDeg = fmodf(azAngleDeg, 360.0f);
             float rad = visualDeg * PI_F / 180.0f;
@@ -1623,7 +1648,7 @@ static void RenderGameplay(void) {
             }
             DrawRing(leverCx, leverCy, (float)leverPivotGrabR, 0xFF333333);
         } else if (fireStage == FIRESTAGE_ELEVATION) {
-            QueueTextCentered(leverCx - 90, leverCy - EL_GRAB_HALF_H - 26, 180, 20, 0, 0xFFEEEEEE, Kor("밀어서 조정하시오"));
+            QueueTextCentered(leverCx - 90, leverCy - EL_GRAB_HALF_H - 26, 180, 20, 0, 0xFFEEEEEE, T("밀어서 조정하시오", "Push to Adjust"));
             /* 드래그 판정 영역(더 넓게)을 먼저 옅게 표시하고, 그 안에 릴 눈금창을 그림 */
             DrawRectOutline(leverCx - EL_GRAB_HALF_W, leverCy - EL_GRAB_HALF_H,
                              EL_GRAB_HALF_W * 2, EL_GRAB_HALF_H * 2, 0xFF262A22);
@@ -1644,7 +1669,7 @@ static void RenderGameplay(void) {
 
             /* 우측 게이지 위 안내문구 -- 방위각/사각 스테이지의 "잡고 돌리시오"류와 같은 자리 */
             QueueTextCentered(FIRE_GAUGE_X - 25, FIRE_GAUGE_Y - 26, FIRE_GAUGE_W + 50, 20, 0,
-                               0xFFEEEEEE, Kor("좌클릭으로 발사"));
+                               0xFFEEEEEE, T("좌클릭으로 발사", "Left-Click to Fire"));
             DrawRectOutline(FIRE_GAUGE_X, FIRE_GAUGE_Y, FIRE_GAUGE_W, FIRE_GAUGE_H, 0xFFAAAAAA);
             /* 붉은 표시 폭 = 실제 명중 판정 허용폭(FIRE_MARK_TOLERANCE_PX)의 2배 -- 눈에 보이는
                빨간 구간이 곧 정확한 히트 존이 되도록, 그리고 불릿보다 확실히 길게 */
@@ -1674,22 +1699,23 @@ static void RenderGameplay(void) {
             }
             /* 통 안 원반들의 현재 합계 -- 몇 개를 넣었는지, 얼마나 더 필요한지 감으로 알 수 있게 */
             char binSumU8[16];
-            wsprintfA(binSumU8, "합 %d", binSum);
+            if (langIndex == 1) wsprintfA(binSumU8, "Sum %d", binSum);
+            else wsprintfA(binSumU8, "합 %d", binSum);
             QueueTextCentered(CHARGE_BIN_X - 20, CHARGE_BIN_Y + CHARGE_BIN_H + 6, CHARGE_BIN_W + 40, 16,
                                0, 0xFFAAAAAA, Kor(binSumU8));
         }
 
         /* 하단 단축키 안내 */
         if (fireStage == FIRESTAGE_AZIMUTH || fireStage == FIRESTAGE_ELEVATION) {
-            QueueTextPoint(20, GAME_H - 32, 0, 0xFFAAAAAA, Kor("드래그: 큰 폭 조정"));
-            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("우클릭: 미세 조정"));
-            QueueTextPoint(200, GAME_H - 20, 0, 0xFFAAAAAA, Kor("스페이스: 확정"));
+            QueueTextPoint(20, GAME_H - 32, 0, 0xFFAAAAAA, T("드래그: 큰 폭 조정", "Drag: Coarse Adjust"));
+            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, T("우클릭: 미세 조정", "Right-Click: Fine Adjust"));
+            QueueTextPoint(200, GAME_H - 20, 0, 0xFFAAAAAA, T("스페이스: 확정", "Space: Confirm"));
         } else if (fireStage == FIRESTAGE_FIRE) {
-            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("표시와 겹칠 때 좌클릭으로 발사"));
+            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, T("표시와 겹칠 때 좌클릭으로 발사", "Left-Click when aligned with mark"));
         } else {
-            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, Kor("드래그로 치우고 합이 맞게 통에 넣으시오"));
+            QueueTextPoint(20, GAME_H - 20, 0, 0xFFAAAAAA, T("드래그로 치우고 합이 맞게 통에 넣으시오", "Drag disks aside, drop matching sum in bin"));
         }
-        QueueTextPoint(GAME_W - 130, GAME_H - 20, 0, 0xFFAAAAAA, Kor("ESC: 나가기"));
+        QueueTextPoint(GAME_W - 130, GAME_H - 20, 0, 0xFFAAAAAA, T("ESC: 나가기", "ESC: Exit"));
     }
 
     /* 스테이지/결과 전환 시 검정화면 페이드 인/아웃 (결과 화면도 이걸로 페이드인됨) */
@@ -1875,10 +1901,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     g_customFontLoaded = LoadCustomFont(fontPath);
     const wchar_t *uiFontName = g_customFontLoaded ? L"HBIOS-SYS" : Kor("맑은 고딕");
 
-    g_fontSmall  = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    g_fontSmall  = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         HANGUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, uiFontName);
-    g_fontMedium = CreateFontW(-26, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    g_fontMedium = CreateFontW(-26, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         HANGUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, uiFontName);
     g_fontLarge  = CreateFontW(-56, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
