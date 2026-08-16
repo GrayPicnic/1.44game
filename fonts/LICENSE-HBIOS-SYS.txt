@@ -10,8 +10,15 @@ This font software is licensed under the Creative Commons Attribution-ShareAlike
   https://openfontlicense.org
 
 서브셋 추출 방법 (새 한글 문구가 추가되면 재실행 필요):
-  1. src/main.c 안의 Kor("...") 리터럴 + wsprintfA로 조립되는 동적 문구까지
-     전부 모아서 실제 쓰이는 문자 집합을 뽑는다 (CONTEXT.md의 관련 세션 기록 참고).
+  1. src/main.c 안의 T("한국어","English")/Kor("...") 리터럴 + wsprintfA로
+     조립되는 동적 문구까지 전부 모아서 실제 쓰이는 문자 집합을 뽑는다
+     (CONTEXT.md의 관련 세션 기록 참고).
   2. python -m fontTools.subset HBIOS-SYS.ttf --text-file=chars.txt \
        --output-file=fonts/HBIOS-SYS.ttf --no-hinting --desubroutinize \
-       --drop-tables+=DSIG
+       --drop-tables+=DSIG --no-prune-codepage-ranges --no-prune-unicode-ranges
+
+  주의: 뒤의 두 --no-prune-* 옵션을 빠뜨리면 pyftsubset이 OS/2 테이블의
+  "한글(Wansung 949) 지원" 비트를 자동으로 꺼버려서, CreateFontW가
+  HANGUL_CHARSET으로 이 폰트를 찾지 못하고 조용히 시스템 폰트(맑은 고딕)로
+  대체됨 (에러 없음 -- 겉보기엔 "폰트가 하나도 안 바뀐 것처럼" 보이는 버그의
+  원인이었음, 2026-08-16 세션 참고).

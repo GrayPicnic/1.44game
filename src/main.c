@@ -624,7 +624,7 @@ static void PlayHitSound(void) {
         float ring = sinf(2.0f * PI_F * 950.0f * ph) * ringEnv;
 
         float s = noise * 0.5f + body * 1.0f + ring * 0.15f;
-        int v = 128 + (int)(s * 80.0f);
+        int v = 128 + (int)(s * 240.0f); /* 80 -> 240 (3배): "타격감이 약하다"는 피드백으로 증폭 */
         if (v < 0) v = 0;
         if (v > 255) v = 255;
         g_hitBuf[i] = (unsigned char)v;
@@ -1817,14 +1817,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 static void FlushTextQueue(void) {
     HFONT fonts[3] = { g_fontSmall, g_fontMedium, g_fontLarge };
+    /* HBIOS-SYS는 한글 음절 advance width가 라틴 문자의 2배(터미널 폰트 관례라 1em 정사각
+       칸)라, 그대로 두면 음절 사이가 헐렁해 보임("자간이 너무 넓다" 피드백) -- 한국어
+       텍스트일 때만 폰트 크기에 비례한 음수 자간으로 타이트하게 당겨준다. 영문은 이미
+       라틴 폭(0.5em)이라 그대로 두고, 폴백 폰트(맑은 고딕)일 때도 이 폭 차이가 없으므로
+       건드리지 않는다. */
+    static const int korCharExtra[3] = { -14, -30, -30 }; /* fontIdx 0/1/2 = 작게/중간/크게 폰트에 대응 -- 작은 폰트는 같은 비율로 줄이면 겹쳐서(픽셀이 적어 여유가 없음) 실측으로 따로 보정함 */
     for (int i = 0; i < textQueueCount; i++) {
         TextCmd *c = &textQueue[i];
         HFONT old = (HFONT)SelectObject(g_hdc, fonts[c->fontIdx]);
         SetTextColor(g_hdc, RGB((c->color >> 16) & 0xFF, (c->color >> 8) & 0xFF, c->color & 0xFF));
+        SetTextCharacterExtra(g_hdc, (langIndex == 1 || !g_customFontLoaded) ? 0 : korCharExtra[c->fontIdx]);
         if (c->w > 0) {
-            RECT rc = { c->x * WINDOW_SCALE, c->y * WINDOW_SCALE,
-                        (c->x + c->w) * WINDOW_SCALE, (c->y + c->h) * WINDOW_SCALE };
-            DrawTextW(g_hdc, c->text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+            /* DrawTextW(DT_CENTER)는 문자열이 길어질수록 자간(character extra) 반영이
+               내부 측정 단계와 어긋나서 글자가 서로 겹치는 버그가 있었음(짧은 문자열은
+               괜찮은데 긴 문자열에서 음절이 뭉개짐) -- GetTextExtentPoint32W로 직접
+               폭을 재서 TextOutW로 그리면 같은 자간 설정을 측정/출력 양쪽에 똑같이
+               적용하므로 항상 정확하게 가운데 정렬됨. */
+            SIZE sz;
+            GetTextExtentPoint32W(g_hdc, c->text, lstrlenW(c->text), &sz);
+            int boxX = c->x * WINDOW_SCALE, boxY = c->y * WINDOW_SCALE;
+            int boxW = c->w * WINDOW_SCALE, boxH = c->h * WINDOW_SCALE;
+            int drawX = boxX + (boxW - sz.cx) / 2;
+            int drawY = boxY + (boxH - sz.cy) / 2;
+            TextOutW(g_hdc, drawX, drawY, c->text, lstrlenW(c->text));
         } else {
             TextOutW(g_hdc, c->x * WINDOW_SCALE, c->y * WINDOW_SCALE, c->text, lstrlenW(c->text));
         }
