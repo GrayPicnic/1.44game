@@ -598,6 +598,12 @@ static void PlayTick(void) {
     waveOutWrite(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
 }
 
+/* 전장 앰비언스는 계속 깔려 있는 소리라(빈틈없이 촘촘하게 설계됨) 명중음을 단순히
+   키우기만 하면 묻혀서 "안 커진 것처럼" 들릴 수 있음 -- 명중 순간 잠깐 전장 앰비언스
+   볼륨을 낮춰서(덕킹) 확실히 튀어나오게 한다. 정의는 아래 전장 앰비언스 섹션에 있음
+   (g_waveOutWar가 거기서 선언되기 때문에 전방 선언만 여기 둠). */
+static void DuckWarAmbience(void);
+
 /* 3단계 명중 시 망치로 때린 듯한 타격음 -- 틱과 같은 핸들을 재사용(동시에 울릴 일이 없음:
    드래그 중엔 3단계에 없고, 3단계에선 드래그를 안 함). 상승하는 맑은 차임이었던 걸
    "캐쥬얼하다"는 피드백으로 교체 -- 노이즈 트랜지언트(타격 순간 "탁") + 낮은 통울림
@@ -615,16 +621,23 @@ static void PlayHitSound(void) {
         float noiseEnv = expf(-t * 45.0f);
         float noise = ((float)(rand() % 2001 - 1000) / 1000.0f) * noiseEnv;
 
-        /* 낮은 통울림(바디): 110Hz가 천천히 감쇠 -- 망치머리가 때리는 둔탁한 저음 "퉁" */
+        /* 낮은 통울림(바디): 전장 앰비언스의 저음 폭발음과 겹치는 대역을 살짝 피하려고
+           110 -> 145Hz로 올림 -- 천천히 감쇠, 망치머리가 때리는 둔탁한 저음 "퉁" */
         float bodyEnv = expf(-t * 6.0f);
-        float body = sinf(2.0f * PI_F * 110.0f * ph) * bodyEnv;
+        float body = sinf(2.0f * PI_F * 145.0f * ph) * bodyEnv;
 
-        /* 짧고 조용한 금속성 배음 -- 쇠붙이끼리 부딪히는 느낌만 살짝 */
-        float ringEnv = expf(-t * 20.0f);
-        float ring = sinf(2.0f * PI_F * 950.0f * ph) * ringEnv;
+        /* 금속성 배음 -- 저음 위주인 전장 앰비언스 사이를 뚫고 나오게 비중을 늘림
+           (쇠붙이끼리 부딪히는 느낌 + 고음 성분으로 존재감 확보) */
+        float ringEnv = expf(-t * 18.0f);
+        float ring = sinf(2.0f * PI_F * 1100.0f * ph) * ringEnv;
 
-        float s = noise * 0.5f + body * 1.0f + ring * 0.15f;
-        int v = 128 + (int)(s * 240.0f); /* 80 -> 240 (3배): "타격감이 약하다"는 피드백으로 증폭 */
+        float s = noise * 0.55f + body * 1.0f + ring * 0.28f;
+        /* 하드클리핑 대신 tanh 소프트새추레이션 -- 그냥 곱해서 클램프하면 파형이 각지게
+           잘려서(디지털 클리핑) 오히려 "약하고 지지직대는" 느낌이 남. tanh는 부드럽게
+           눌러줘서 훨씬 크고 뭉툭한(펀치感 있는) 소리가 됨. */
+        float driven = s * 3.2f;
+        float soft = tanhf(driven);
+        int v = 128 + (int)(soft * 120.0f);
         if (v < 0) v = 0;
         if (v > 255) v = 255;
         g_hitBuf[i] = (unsigned char)v;
@@ -634,6 +647,7 @@ static void PlayHitSound(void) {
     g_tickHdr.dwBufferLength = HIT_SAMPLES;
     waveOutPrepareHeader(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
     waveOutWrite(g_waveOutTick, &g_tickHdr, sizeof(WAVEHDR));
+    DuckWarAmbience();
 }
 
 /* ---------- 무전 콜아웃 보이스: 실제 육성 녹음(0~9) -- 밴드패스+링모듈레이션+비트크러시로
@@ -902,6 +916,16 @@ static WAVEHDR g_warHdr;
 static unsigned char g_warBuf[WAR_TOTAL_SAMPLES];
 static BOOL g_warOutOpen = FALSE;
 static BOOL g_warPlaying = FALSE;
+static float g_warDuckTimer = 0.0f; /* >0인 동안 볼륨을 낮춰둠 -- 3단계 명중음이 묻히지 않게 */
+
+/* 명중음이 재생되는 동안(~120ms) 전장 앰비언스를 살짝 죽여서 명중음이 확실히 들리게 함.
+   waveOutSetVolume은 버퍼를 다시 만들 필요 없이 재생 중인 소리의 출력 볼륨만 즉시
+   바꿔주므로 이 짧은 덕킹에 딱 맞음. */
+static void DuckWarAmbience(void) {
+    if (!g_warOutOpen) return;
+    waveOutSetVolume(g_waveOutWar, MAKELONG(0x2800, 0x2800));
+    g_warDuckTimer = 0.18f;
+}
 
 static void GenerateWarLoop(void) {
     static float mixBuf[WAR_TOTAL_SAMPLES];
@@ -1005,8 +1029,15 @@ static void InitWar(void) {
 }
 
 /* 인트로/게임플레이 중에만, 그리고 미션 성공(RESULT_HIT) 전까지만 재생 */
-static void UpdateWarLoop(void) {
+static void UpdateWarLoop(float dt) {
     if (!g_warOutOpen) return;
+    if (g_warDuckTimer > 0.0f) {
+        g_warDuckTimer -= dt;
+        if (g_warDuckTimer <= 0.0f) {
+            g_warDuckTimer = 0.0f;
+            waveOutSetVolume(g_waveOutWar, MAKELONG(0xFFFF, 0xFFFF));
+        }
+    }
     BOOL inMission = (scene == SCENE_INTRO || scene == SCENE_GAMEPLAY);
     BOOL shouldPlay = soundOn && inMission && finalResult != RESULT_HIT;
     if (!shouldPlay) {
@@ -1917,10 +1948,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
     g_customFontLoaded = LoadCustomFont(fontPath);
     const wchar_t *uiFontName = g_customFontLoaded ? L"HBIOS-SYS" : Kor("맑은 고딕");
 
-    g_fontSmall  = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+    g_fontSmall  = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         HANGUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, uiFontName);
-    g_fontMedium = CreateFontW(-26, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+    g_fontMedium = CreateFontW(-26, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         HANGUL_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, uiFontName);
     g_fontLarge  = CreateFontW(-56, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
@@ -1952,7 +1983,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
         UpdateGame(dt);
         RenderGame();
         UpdateMusicLoop();
-        UpdateWarLoop();
+        UpdateWarLoop(dt);
 
         RECT client;
         GetClientRect(hwnd, &client);
